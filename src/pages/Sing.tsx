@@ -16,7 +16,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Save, Volume2, VolumeX, Search, Check, Loader2, Share2, X } from "lucide-react";
+import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Volume2, VolumeX, Search, Check, Loader2, Share2, X } from "lucide-react";
 import { SeparationWaitScreen } from "@/components/SeparationWaitScreen";
 import { VocalsIcon } from "@/components/icons/VocalsIcon";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -26,7 +26,6 @@ import { useVocalsComparison } from "@/hooks/useVocalsComparison";
 import { useAuth } from "@/hooks/useAuth";
 import { Slider } from "@/components/ui/slider";
 import { useVocalSeparation } from "@/hooks/useVocalSeparation";
-import { ScoreSubmissionDialog } from "@/components/karaoke/ScoreSubmissionDialog";
 import { AudioDebugOverlay } from "@/components/karaoke/AudioDebugOverlay";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
@@ -82,11 +81,12 @@ const Sing = () => {
   const [separationStartedAt, setSeparationStartedAt] = useState<number | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
   const [isMuted, setIsMuted] = useState(false);
-  const [showScoreSubmission, setShowScoreSubmission] = useState(false);
   const preEndTriggeredRef = useRef(false);
+  const autoSaveTriggeredRef = useRef(false); // guards submitScoreToLeaderboard to fire once per completion
 
   // -- Exit-confirm overlay (back button pressed mid-performance) ---------
   // Shows the same score/rating breakdown as the end-of-song results,
@@ -783,11 +783,12 @@ const Sing = () => {
     scoreAccumulatorRef.current = { pitch: 0, rhythm: 0, technique: 0, count: 0 };
     resetScores();
     setShowResults(false);
-    setShowScoreSubmission(false);
     setShowExitConfirm(false);
     setShowPauseCheckpoint(false);
     lastCheckpointAtSecondsRef.current = 0;
     preEndTriggeredRef.current = false;
+    autoSaveTriggeredRef.current = false;
+    setScoreSaveStatus('idle');
     separationStartedAtRef.current = null;
     setSeparationStartedAt(null);
     if (audioRef.current) {
@@ -804,56 +805,7 @@ const Sing = () => {
   // preEndTriggeredRef is kept for safety but no longer set mid-song.
   // (Previously this triggered at timeRemaining <= 3, cutting off the ending.)
 
-  const handleScoreSubmit = async (displayName: string, city: string) => {
-    if (!user || !track) {
-      toast({ title: "Please sign in to save scores", variant: "destructive" });
-      return;
-    }
 
-    setIsSaving(true);
-    try {
-      const avgPitch = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0;
-      const avgRhythm = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0;
-
-      const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' : 
-                   totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
-
-      const { error } = await supabase.functions.invoke('submit-score', {
-        body: {
-          songTitle: track.title,
-          songArtist: track.artist,
-          trackId: track.id,
-          score: totalScore,
-          rating: scoreRating,
-          timingAccuracy: Math.round(avgPitch),
-          rhythmAccuracy: Math.round(avgRhythm),
-          durationSeconds: Math.round(duration),
-          playedSeconds: Math.round(currentTime),
-          thumbnailUrl: track.thumbnail,
-          displayName,
-          city,
-        },
-      });
-
-      if (error) throw error;
-
-      toast({ title: "Score saved to leaderboard!" });
-      setShowScoreSubmission(false);
-      navigate('/leaderboard');
-    } catch (error) {
-      console.error('Failed to save score:', error);
-      toast({ title: "Failed to save score", variant: "destructive" });
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCloseScoreSubmission = () => {
-    setShowScoreSubmission(false);
-    setShowResults(true);
-  };
 
   // -- Share score card ----------------------------------------------------
   // Draws a shareable PNG (rating, score, breakdown, song, branding) on a
@@ -980,48 +932,78 @@ const Sing = () => {
     }
   }, [totalScore, rating, track, generateScoreCardImage, toast]);
 
-  const handleSaveScore = async () => {
-    if (!user || !track) {
-      toast({ title: "Please sign in to save scores", variant: "destructive" });
-      return;
-    }
+  // -- Automatic leaderboard save ------------------------------------------
+  // Fires once, automatically, the moment the song completes naturally --
+  // no button click required. Works whether or not the user is signed in:
+  //   - Signed in: saved under their real account via the normal
+  //     authenticated Supabase client.
+  //   - Not signed in: saved via an ISOLATED anonymous Supabase session
+  //     (submitScoreAnonymously) that never touches the app's main auth
+  //     state, so a guest never appears "logged in" anywhere else. Their
+  //     city/country is auto-detected server-side from their IP address
+  //     since there's no profile to pull a location from.
+  const submitScoreToLeaderboard = useCallback(async () => {
+    if (!track) return;
 
     setIsSaving(true);
+    setScoreSaveStatus('saving');
     try {
-      const avgPitch = scoreAccumulatorRef.current.count > 0 
+      const avgPitch = scoreAccumulatorRef.current.count > 0
         ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0;
-      const avgRhythm = scoreAccumulatorRef.current.count > 0 
+      const avgRhythm = scoreAccumulatorRef.current.count > 0
         ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0;
 
-      const rating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' : 
-                     totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
+      const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' :
+        totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
 
-      const { error } = await supabase.functions.invoke('submit-score', {
-        body: {
-          songTitle: track.title,
-          songArtist: track.artist,
-          trackId: track.id,
-          score: totalScore,
-          rating,
-          timingAccuracy: Math.round(avgPitch),
-          rhythmAccuracy: Math.round(avgRhythm),
-          durationSeconds: Math.round(duration),
-          playedSeconds: Math.round(currentTime),
-          thumbnailUrl: track.thumbnail,
-        },
-      });
+      // Auth is optional at the API level now -- submit-score accepts both
+      // signed-in requests (attributed to the account, feeds profile stats)
+      // and anonymous ones (user_id left NULL, city auto-detected from IP
+      // server-side). Always go through the normal shared client; no
+      // separate anonymous-session workaround needed.
+      const displayName = (user && !user.is_anonymous)
+        ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
+        : 'Guest';
 
+      const payload = {
+        songTitle: track.title,
+        songArtist: track.artist,
+        trackId: track.id,
+        score: totalScore,
+        rating: scoreRating,
+        timingAccuracy: Math.round(avgPitch),
+        rhythmAccuracy: Math.round(avgRhythm),
+        durationSeconds: Math.round(duration),
+        playedSeconds: Math.round(currentTime),
+        thumbnailUrl: track.thumbnail,
+        displayName,
+        // city intentionally omitted -- the edge function auto-detects it
+        // from the request's IP address when not provided.
+      };
+
+      const { error } = await supabase.functions.invoke('submit-score', { body: payload });
       if (error) throw error;
 
-      toast({ title: "Score saved!" });
-      navigate('/history');
+      setScoreSaveStatus('saved');
+      console.log('[Leaderboard] Score auto-saved:', totalScore, scoreRating);
     } catch (error) {
-      console.error('Failed to save score:', error);
-      toast({ title: "Failed to save score", variant: "destructive" });
+      console.error('[Leaderboard] Auto-save failed:', error);
+      setScoreSaveStatus('failed');
     } finally {
       setIsSaving(false);
     }
-  };
+  }, [track, user, totalScore, duration, currentTime]);
+
+  // Trigger the auto-save exactly once, only when the song completes
+  // naturally (showResults only ever becomes true via onEnded / the
+  // timeupdate safety net -- exit-confirm and pause-checkpoint use their
+  // own separate state, so this never fires for a mid-song "Leave").
+  useEffect(() => {
+    if (showResults && !autoSaveTriggeredRef.current) {
+      autoSaveTriggeredRef.current = true;
+      submitScoreToLeaderboard();
+    }
+  }, [showResults, submitScoreToLeaderboard]);
 
   const getScoreColor = (value: number) => {
     if (value >= 80) return 'bg-score-perfect';
@@ -1163,17 +1145,6 @@ const Sing = () => {
         estimatedSeconds={35}
       />
 
-      {/* Score Submission Dialog - appears 3 seconds before song ends */}
-      <ScoreSubmissionDialog
-        isOpen={showScoreSubmission}
-        onClose={handleCloseScoreSubmission}
-        onSubmit={handleScoreSubmit}
-        score={totalScore}
-        rating={rating}
-        songTitle={track?.title || 'Unknown Song'}
-        isSubmitting={isSaving}
-      />
-
       {/* Shared score breakdown -- used by end-of-song results, exit-confirm,
           and pause-checkpoint overlays so the three stay visually consistent. */}
       {(() => {
@@ -1234,6 +1205,35 @@ const Sing = () => {
                 </button>
                 <div className="text-center max-w-md">
                   {scoreBreakdown}
+
+                  {/* Auto-save status -- no button needed, this happens automatically
+                      for everyone (signed in or not) the moment the song ends. */}
+                  <div className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground min-h-[24px]">
+                    {scoreSaveStatus === 'saving' && (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Saving to leaderboard...
+                      </>
+                    )}
+                    {scoreSaveStatus === 'saved' && (
+                      <>
+                        <Check className="w-4 h-4 text-green-500" />
+                        Saved to leaderboard
+                      </>
+                    )}
+                    {scoreSaveStatus === 'failed' && (
+                      <>
+                        <span>Could not save score</span>
+                        <button
+                          onClick={submitScoreToLeaderboard}
+                          className="underline hover:text-foreground transition-colors"
+                        >
+                          Retry
+                        </button>
+                      </>
+                    )}
+                  </div>
+
                   <div className="flex flex-wrap gap-4 justify-center">
                     <Button variant="outline" size="lg" onClick={handleRestart}>
                       <RotateCcw className="w-5 h-5 mr-2" />
@@ -1243,17 +1243,6 @@ const Sing = () => {
                       <Share2 className="w-5 h-5 mr-2" />
                       Share
                     </Button>
-                    {user && (
-                      <Button
-                        size="lg"
-                        className="gradient-primary text-primary-foreground"
-                        onClick={handleSaveScore}
-                        disabled={isSaving}
-                      >
-                        <Save className="w-5 h-5 mr-2" />
-                        {isSaving ? 'Saving...' : 'Save Score'}
-                      </Button>
-                    )}
                   </div>
                 </div>
               </div>
