@@ -548,7 +548,7 @@ const Index = () => {
 
       {/* Footer */}
       <footer className="py-6 px-4 border-t border-border text-center text-muted-foreground text-sm">
-        <p>Built with ❤️ for Indian music lovers by ajparag@gmail.com</p>
+        <p>Built with ❤️ for Indian music lovers by parag.airun@gmail.com</p>
       </footer>
     </div>
   );
