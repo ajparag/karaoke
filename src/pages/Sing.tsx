@@ -150,10 +150,11 @@ const Sing = () => {
         try { (navigator as any).audioSession.type = 'playback'; } catch {}
       }
       console.log('[audio] Silent media context created for volume button routing');
-      // Clean up after a short delay
-      setTimeout(() => {
-        try { silentCtx.close(); } catch {}
-      }, 1000);
+      // Do NOT close the context -- keeping it alive is what tells Android
+      // to route hardware volume buttons to media volume. Closing it reverts
+      // to call/ringtone volume. The context uses negligible resources once
+      // the oscillator stops (no active audio processing, just a live graph).
+      // It will be garbage-collected naturally when the page unloads.
     } catch (e) {
       console.warn('[audio] Silent context failed:', e);
     }
@@ -175,6 +176,7 @@ const Sing = () => {
     startAnalysis,
     stopAnalysis,
     resetScores,
+    resetAccumulators,
     setRefVolume,
   } = useVocalsComparison({
     vocalsUrl: separatedAudio?.vocalsUrl,
@@ -232,7 +234,6 @@ const Sing = () => {
 
       loadFromCache(track.audioUrl).then((result) => {
         if (result) {
-          console.log('[sing] Loaded separated audio:', result.fromCache ? 'cached' : 'processed');
         }
       });
     }
@@ -360,7 +361,6 @@ const Sing = () => {
 
     const onCanPlay = () => markReady('canplay');
     audio.addEventListener('canplay', onCanPlay);
-    audio.addEventListener('canplaythrough', () => console.log('[sing] canplaythrough fired'));
     audio.addEventListener('progress', () => {
       if (audio.buffered.length > 0) {
         // Log buffering progress at most once every 10 seconds to reduce log volume
@@ -405,9 +405,6 @@ const Sing = () => {
         }
       }
     });
-    audio.addEventListener('stalled', () => console.log('[sing] stalled'));
-    audio.addEventListener('waiting', () => console.log('[sing] waiting'));
-    audio.addEventListener('suspend', () => console.log('[sing] suspend'));
 
     const onTimeUpdate = () => {
       if (!isMounted) return;
@@ -810,7 +807,11 @@ const Sing = () => {
     setCurrentTime(0);
     setTotalScore(0);
     scoreAccumulatorRef.current = { pitch: 0, rhythm: 0, technique: 0, count: 0 };
-    resetScores();
+    // Use resetAccumulators (not resetScores) -- "Try Again" replays the
+    // SAME song, so the reference audio graph should stay alive. resetScores
+    // tears it down entirely, which was causing scoring to stop until the
+    // user manually toggled the mic button to rebuild it.
+    resetAccumulators();
     setShowResults(false);
     setShowExitConfirm(false);
     setShowPauseCheckpoint(false);
@@ -827,7 +828,7 @@ const Sing = () => {
       vocalsAudioRef.current.currentTime = 0;
     }
     // Hook's vocals audio is synced via currentTime prop
-  }, [resetScores]);
+  }, [resetAccumulators]);
 
   // Score submission dialog is shown AFTER the song ends naturally (via onEnded).
   // We no longer interrupt the last few seconds of the song.
