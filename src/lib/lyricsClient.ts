@@ -176,39 +176,102 @@ interface RankedResult {
   artistName: string;
 }
 
-// Rank and pick the best result from an array of LRCLIB search results
+// Rank and pick the best result from an array of LRCLIB search results.
+//
+// HARD FILTERS applied in tiers (strictest first, relax on fallback):
+//   Tier 1: Exact title + not a cover/remix/karaoke
+//   Tier 2: Exact title + covers allowed (original might not be on LRCLIB)
+//   Tier 3: Partial title + not a cover
+//   Tier 4: Partial title + covers allowed (last resort)
+//
+// Within each tier, synced results always beat plain. Within synced (or
+// within plain), rank by duration proximity + script preference.
+
+const COVER_KEYWORDS = /\b(cover|remix|karaoke|instrumental|live|acoustic|unplugged|slowed|reverb|lofi|lo-fi|mashup|reprise|recreated)\b/i;
+const FEAT_PATTERN = /\(feat\..*?\)/i;
+
 function pickBestResult(
   pool: any[],
   title: string,
   duration: number | undefined,
   language: string | undefined,
 ): RankedResult | null {
-  const titleLower = title.toLowerCase();
+  const titleLower = title.toLowerCase().trim();
   const titleWords = titleLower.split(/\s+/);
-  let best: any = null;
-  let bestScript: Script = 'unknown';
-  let bestScore = Infinity;
 
-  for (const item of pool.slice(0, 30)) {
-    const name = (item.trackName || '').toLowerCase();
-    const matched = titleWords.filter(w => name.includes(w)).length;
-    const dist = titleWords.length - matched;
-    const durPen = duration && item.duration ? Math.abs(item.duration - duration) * 0.05 : 0;
+  // Classify each item once
+  interface Classified {
+    item: any;
+    isExactTitle: boolean;
+    isCoverVariant: boolean;
+    durScore: number;
+    scriptScore: number;
+    script: Script;
+  }
+
+  const classified: Classified[] = pool.slice(0, 40).map(item => {
+    const rawName = (item.trackName || '');
+    const nameLower = rawName.toLowerCase().trim();
+    // Strip parenthetical suffixes for title comparison
+    const nameCore = nameLower.replace(/\s*[\(\[].*$/, '').trim();
+    const titleCore = titleLower.replace(/\s*[\(\[].*$/, '').trim();
+
+    // Exact: core title matches exactly (ignoring parenthetical tags)
+    const isExactTitle = nameCore === titleCore;
+
+    // Cover/variant: contains cover/remix/karaoke keywords or (feat.)
+    const isCoverVariant = COVER_KEYWORDS.test(rawName) || FEAT_PATTERN.test(rawName);
+
+    // Duration proximity (0 = perfect match, higher = worse)
+    const durScore = duration && item.duration
+      ? Math.abs(item.duration - duration)
+      : 0;
+
     const lyricsText = item.syncedLyrics || item.plainLyrics || '';
     const script = detectScript(lyricsText);
-    const scriptPen = scriptPenalty(script, language);
-    const syncBonus = item.syncedLyrics ? 0 : 50; // strongly prefer synced
-    const s = dist + durPen + scriptPen + syncBonus;
-    if (s < bestScore) { bestScore = s; best = item; bestScript = script; }
+    const scriptScore = scriptPenalty(script, language);
+
+    return { item, isExactTitle, isCoverVariant, durScore, scriptScore, script };
+  });
+
+  // Split synced vs plain -- synced ALWAYS preferred
+  const synced = classified.filter(c => c.item.syncedLyrics);
+  const plain = classified.filter(c => !c.item.syncedLyrics && c.item.plainLyrics);
+  const candidates = synced.length > 0 ? synced : plain;
+
+  if (candidates.length === 0) return null;
+
+  // Apply tiers: strictest filter first, relax if no results
+  const tiers: ((c: Classified) => boolean)[] = [
+    c => c.isExactTitle && !c.isCoverVariant,   // Tier 1: exact + original
+    c => c.isExactTitle,                         // Tier 2: exact + covers OK
+    c => !c.isCoverVariant,                      // Tier 3: partial + original
+    () => true,                                  // Tier 4: anything
+  ];
+
+  let survivors: Classified[] = [];
+  for (const filter of tiers) {
+    survivors = candidates.filter(filter);
+    if (survivors.length > 0) break;
   }
 
-  if (!best) return null;
+  if (survivors.length === 0) return null;
 
-  if (best.syncedLyrics) {
-    return { lyrics: parseLRC(best.syncedLyrics), script: bestScript, trackName: best.trackName, artistName: best.artistName };
+  // Rank survivors by duration proximity + script preference
+  survivors.sort((a, b) => {
+    const scoreA = a.durScore + a.scriptScore * 10;
+    const scoreB = b.durScore + b.scriptScore * 10;
+    return scoreA - scoreB;
+  });
+
+  const best = survivors[0];
+  const bestItem = best.item;
+
+  if (bestItem.syncedLyrics) {
+    return { lyrics: parseLRC(bestItem.syncedLyrics), script: best.script, trackName: bestItem.trackName, artistName: bestItem.artistName };
   }
-  if (best.plainLyrics) {
-    return { lyrics: plainToLyricLines(best.plainLyrics), script: bestScript, trackName: best.trackName, artistName: best.artistName };
+  if (bestItem.plainLyrics) {
+    return { lyrics: plainToLyricLines(bestItem.plainLyrics), script: best.script, trackName: bestItem.trackName, artistName: bestItem.artistName };
   }
   return null;
 }
