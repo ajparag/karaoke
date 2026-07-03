@@ -10,6 +10,7 @@
 // =============================================================================
 
 import { supabase } from "@/integrations/supabase/client";
+import { getCachedLyrics, cacheLyrics } from "@/lib/lyricsCache";
 
 export interface LyricLine {
   time: number;
@@ -310,17 +311,30 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
 export async function fetchLyricsCached(args: FetchArgs): Promise<{ lyrics: LyricLine[] }> {
   const key = cacheKey(args);
 
-  // Serve from cache
+  // 1. In-memory cache (survives within a single page session)
   if (cache.has(key)) {
     const cached = cache.get(key);
     if (cached?.lyrics?.length > 0) {
-      console.log('[Lyrics] Cache HIT:', cached.lyrics.length, 'lines');
+      console.log('[Lyrics] In-memory cache HIT:', cached.lyrics.length, 'lines');
       return cached;
     }
     cache.delete(key);
   }
 
-  // Deduplicate in-flight requests (Index.tsx + Sing.tsx call simultaneously)
+  // 2. IndexedDB cache (survives across sessions / page reloads)
+  try {
+    const idbLyrics = await getCachedLyrics(key);
+    if (idbLyrics && idbLyrics.length > 0) {
+      console.log('[Lyrics] IndexedDB cache HIT:', idbLyrics.length, 'lines');
+      const result = { lyrics: idbLyrics };
+      cache.set(key, result); // promote to in-memory for this session
+      return result;
+    }
+  } catch (e) {
+    console.warn('[Lyrics] IndexedDB read failed (non-fatal):', e);
+  }
+
+  // 3. Deduplicate in-flight requests (Index.tsx + Sing.tsx call simultaneously)
   if (inFlight.has(key)) {
     console.log('[Lyrics] Joining in-flight request for:', args.title);
     return inFlight.get(key)!;
@@ -339,6 +353,8 @@ export async function fetchLyricsCached(args: FetchArgs): Promise<{ lyrics: Lyri
     const result = { lyrics };
     if (lyrics.length > 0) {
       cache.set(key, result);
+      // Background save to IndexedDB -- fire and forget, never blocks
+      cacheLyrics(key, lyrics).catch(() => {});
       console.log('[Lyrics] SUCCESS:', lyrics.length, 'lines for', args.title);
     } else {
       console.log('[Lyrics] FAILED: No lyrics found for', args.title, args.artist || '');
