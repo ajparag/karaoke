@@ -813,6 +813,18 @@ const Sing = () => {
   // available (opens the native share sheet -- WhatsApp, etc. on mobile),
   // falling back to a plain text+link share, then to clipboard copy on
   // browsers with no share API at all (most desktop browsers).
+  const getRating = (score: number) => {
+    if (score >= 900) return { letter: 'L', color: 'text-score-perfect' };
+    if (score >= 800) return { letter: 'S', color: 'text-score-perfect' };
+    if (score >= 700) return { letter: 'A', color: 'text-score-great' };
+    if (score >= 600) return { letter: 'B', color: 'text-score-good' };
+    if (score >= 500) return { letter: 'C', color: 'text-score-ok' };
+    if (score >= 300) return { letter: 'D', color: 'text-score-ok' };
+    return { letter: 'F', color: 'text-score-miss' };
+  };
+
+  const rating = getRating(totalScore);
+
   const generateScoreCardImage = useCallback((): Promise<Blob | null> => {
     return new Promise((resolve) => {
       const width = 1080;
@@ -824,7 +836,7 @@ const Sing = () => {
       if (!ctx) { resolve(null); return; }
 
       const ratingColors: Record<string, string> = {
-        L: '#facc15', S: '#facc15', A: '#34d399', B: '#60a5fa',
+        L: '#facc15', S: '#facc15', A: '#4ade80', B: '#60a5fa',
         C: '#fb923c', D: '#fb923c', F: '#f87171',
       };
       const ratingColor = ratingColors[rating.letter] || '#facc15';
@@ -1012,17 +1024,6 @@ const Sing = () => {
     return 'bg-score-miss';
   };
 
-  const getRating = (score: number) => {
-    if (score >= 900) return { letter: 'L', color: 'text-score-perfect' };
-    if (score >= 800) return { letter: 'S', color: 'text-score-perfect' };
-    if (score >= 700) return { letter: 'A', color: 'text-score-great' };
-    if (score >= 600) return { letter: 'B', color: 'text-score-good' };
-    if (score >= 500) return { letter: 'C', color: 'text-score-ok' };
-    if (score >= 300) return { letter: 'D', color: 'text-score-ok' };
-    return { letter: 'F', color: 'text-score-miss' };
-  };
-
-  const rating = getRating(totalScore);
 
   // -- Back button guard (hardware/gesture back + in-app arrow) -----------
   // Mid-performance is defined as: currently playing, OR paused partway
