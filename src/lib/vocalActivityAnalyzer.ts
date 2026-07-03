@@ -22,9 +22,13 @@ export interface VocalInterval {
   end: number;   // seconds
 }
 
-const RMS_THRESHOLD = 0.04;       // matches REF_VOCAL_THRESHOLD in useVocalsComparison
+const RMS_THRESHOLD = 0.08;       // higher than real-time scoring threshold (0.04) to filter
+                                  // out MDX vocal-separation bleed (residual instrumental
+                                  // energy that leaks into the vocals stem). Scoring needs
+                                  // sensitivity; highlight timing needs selectivity.
 const WINDOW_MS = 50;             // 50ms windows -- ~20 windows/second, good resolution
-const MIN_SILENCE_GAP_MS = 300;   // gaps shorter than this are merged (breathing pauses within a phrase)
+const MIN_SILENCE_GAP_MS = 500;   // gaps shorter than this are merged (breathing pauses,
+                                  // brief bleed spikes that survive the higher threshold)
 
 /**
  * Fetches and decodes the vocals stem, then scans it for vocal activity.

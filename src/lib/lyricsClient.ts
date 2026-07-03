@@ -3,10 +3,17 @@
 // v1 -- Cached all results including failures.
 // v2 -- Never cache failures.
 // v3 -- Direct LRCLIB fallback + plain lyrics.
-// v4 -- CURRENT: Skip edge function (returns empty, wastes 30s).
-//   Go straight to direct LRCLIB search from browser.
-//   In-flight deduplication prevents Index.tsx + Sing.tsx double fetch.
-//   Queries run in batches of 2 to avoid saturating the connection.
+// v4 -- Skip edge function, in-flight dedup, batched queries.
+// v5 -- CURRENT: Three-step LRCLIB pipeline:
+//   Step 1: Structured /api/search?track_name=X (+album, +duration combos)
+//     -- No artist needed; handles Bollywood multi-artist inconsistencies.
+//     -- 4 parallel requests, returns arrays, ranked by title/duration/script.
+//   Step 2: /api/get with ALL artist name permutations (parallel).
+//     -- Full unsplit string + all orderings of up to 3 individual artists.
+//     -- Handles LRCLIB's exact-match requirement by brute-forcing every
+//        plausible artist_name string (~16 combinations for 3 artists).
+//   Step 3: Free-text /api/search?q= (batched, 2 at a time, last resort).
+//   IndexedDB + in-memory caching, in-flight deduplication preserved.
 // =============================================================================
 
 import { supabase } from "@/integrations/supabase/client";
@@ -23,7 +30,7 @@ interface FetchArgs {
   artist?: string;
   album?: string;
   duration?: number;
-  language?: string; // "hindi", "punjabi", "english", etc. from Saavn
+  language?: string;
 }
 
 const cache = new Map<string, any>();
@@ -70,12 +77,8 @@ function plainToLyricLines(plain: string): LyricLine[] {
     .map((text, i) => ({ time: i * 4, text: text.trim(), duration: 4 }));
 }
 
-// -- Script detection ---------------------------------------------------
-// Detects the dominant script of a lyrics block. Used to prefer Devanagari
-// results for Hindi songs -- LRCLIB stores the same song under multiple
-// scripts (Devanagari, romanized Latin, occasionally Gurmukhi/Punjabi if a
-// contributor mislabels it), and Devanagari is what most Hindi-speaking
-// users expect to read while singing.
+// --- Script detection ---
+
 type Script = 'devanagari' | 'latin' | 'gurmukhi' | 'dual' | 'unknown';
 
 function detectScript(text: string): Script {
@@ -91,8 +94,6 @@ function detectScript(text: string): Script {
   const devaPct = deva / total;
   const latinPct = latin / total;
   const guruPct = gurmukhi / total;
-  // Mixed script (e.g. Hindi verse + English chorus) -- more than one
-  // script each representing a meaningful share of the text.
   const significant = [devaPct, latinPct, guruPct].filter(p => p > 0.15).length;
   if (significant >= 2) return 'dual';
   if (devaPct > latinPct && devaPct > guruPct) return 'devanagari';
@@ -101,89 +102,192 @@ function detectScript(text: string): Script {
   return 'unknown';
 }
 
-// Scoring penalty applied per script, only when the song's Saavn language
-// is Hindi. Lower is better (this is subtracted... actually added to a
-// "lower is better" distance score, so it works like a penalty).
 function scriptPenalty(script: Script, language?: string): number {
   const isHindi = (language || '').toLowerCase() === 'hindi';
-  if (!isHindi) return 0; // no script bias for non-Hindi songs
+  if (!isHindi) return 0;
   switch (script) {
-    case 'devanagari': return 0;      // preferred
-    case 'latin': return 0;           // equally acceptable -- romanized lyrics are fine
-    case 'unknown': return 3;         // usually short/ambiguous text, slight caution
-    case 'gurmukhi': return 10;       // wrong script for Hindi audience -- moderate, same as dual
-    case 'dual': return 10;           // mixed script, distracting while singing
+    case 'devanagari': return 0;
+    case 'latin': return 0;
+    case 'unknown': return 3;
+    case 'gurmukhi': return 10;
+    case 'dual': return 10;
   }
 }
 
-
-
-// --- Direct LRCLIB search ---
+// --- Shared helpers ---
 
 const LRCLIB_HEADERS = { 'Lrclib-Client': 'KaraokeParty (https://karaokeparty.in)' };
 
-async function searchLRCLIBDirect(title: string, artist?: string, album?: string, duration?: number, language?: string): Promise<LyricLine[]> {
-  const words = title.split(/\s+/);
-  const trimmedWords = words.map(w => w.length > 4 ? w.slice(0, -1) : w);
-  const trimmedTitle = trimmedWords.join(' ');
+interface RankedResult {
+  lyrics: LyricLine[];
+  script: Script;
+  trackName: string;
+  artistName: string;
+}
 
-  // -- Step 1: Try /api/get (exact metadata match -- fastest) ----------
-  // Uses title + artist + album + duration for precise lookup.
-  // Returns a single result, no ranking needed.
-  // artist_name is REQUIRED by /api/get (400 without it).
-  // LRCLIB does EXACT matching on artist_name. The tricky part: LRCLIB
-  // might store the artist as the FULL combined string from the original
-  // source (e.g. "Pritam, Neeraj Shridhar, Kavita Seth") OR under just
-  // one individual singer's name (e.g. "Neeraj Shridhar"). We don't know
-  // which, so we try BOTH: the full unsplit string first (most likely to
-  // match since many LRCLIB entries mirror the source's exact artist
-  // field), then individual artists as fallbacks.
-  const fullArtist = (artist || '').trim();
-  const individualArtists = fullArtist
-    .split(/[,&]/)
-    .map(a => a.trim())
-    .filter(a => a.length > 0)
-    .slice(0, 3); // max 3 individual artists
+// Rank and pick the best result from an array of LRCLIB search results
+function pickBestResult(
+  pool: any[],
+  title: string,
+  duration: number | undefined,
+  language: string | undefined,
+): RankedResult | null {
+  const titleLower = title.toLowerCase();
+  const titleWords = titleLower.split(/\s+/);
+  let best: any = null;
+  let bestScript: Script = 'unknown';
+  let bestScore = Infinity;
 
-  // Full string first, then individuals -- deduplicated via the 'seen' set
-  const artists = [fullArtist, ...individualArtists].filter(a => a.length > 0);
+  for (const item of pool.slice(0, 30)) {
+    const name = (item.trackName || '').toLowerCase();
+    const matched = titleWords.filter(w => name.includes(w)).length;
+    const dist = titleWords.length - matched;
+    const durPen = duration && item.duration ? Math.abs(item.duration - duration) * 0.05 : 0;
+    const lyricsText = item.syncedLyrics || item.plainLyrics || '';
+    const script = detectScript(lyricsText);
+    const scriptPen = scriptPenalty(script, language);
+    const syncBonus = item.syncedLyrics ? 0 : 50; // strongly prefer synced
+    const s = dist + durPen + scriptPen + syncBonus;
+    if (s < bestScore) { bestScore = s; best = item; bestScript = script; }
+  }
 
-  const getAttempts: string[] = [];
-  const seen = new Set<string>();
+  if (!best) return null;
 
-  for (const art of artists) {
-    const combos: [boolean, boolean][] = [
-      [true, true],   // album + duration (most specific)
-      [false, true],  // duration only
-      [true, false],  // album only
-      [false, false], // broadest
-    ];
-    for (const [useAlbum, useDur] of combos) {
-      if (useAlbum && !album) continue;
-      if (useDur && !duration) continue;
-      const p = new URLSearchParams();
-      p.set('track_name', title);
-      p.set('artist_name', art);
-      if (useAlbum) p.set('album_name', album!);
-      if (useDur) p.set('duration', String(duration));
-      const key = p.toString();
-      if (!seen.has(key)) { seen.add(key); getAttempts.push(key); }
+  if (best.syncedLyrics) {
+    return { lyrics: parseLRC(best.syncedLyrics), script: bestScript, trackName: best.trackName, artistName: best.artistName };
+  }
+  if (best.plainLyrics) {
+    return { lyrics: plainToLyricLines(best.plainLyrics), script: bestScript, trackName: best.trackName, artistName: best.artistName };
+  }
+  return null;
+}
+
+// Generate all permutations of an array
+function permutations<T>(arr: T[]): T[][] {
+  if (arr.length <= 1) return [arr];
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+    for (const perm of permutations(rest)) {
+      result.push([arr[i], ...perm]);
+    }
+  }
+  return result;
+}
+
+// =============================================================================
+// STEP 1: Structured /api/search?track_name=X (no artist needed)
+// =============================================================================
+
+async function step1StructuredSearch(
+  title: string, album?: string, duration?: number, language?: string,
+): Promise<RankedResult | null> {
+  const params: URLSearchParams[] = [];
+
+  // Most specific to broadest
+  if (album && duration) {
+    const p = new URLSearchParams();
+    p.set('track_name', title); p.set('album_name', album); p.set('duration', String(duration));
+    params.push(p);
+  }
+  if (duration) {
+    const p = new URLSearchParams();
+    p.set('track_name', title); p.set('duration', String(duration));
+    params.push(p);
+  }
+  if (album) {
+    const p = new URLSearchParams();
+    p.set('track_name', title); p.set('album_name', album);
+    params.push(p);
+  }
+  // Always: track_name only
+  const pBroad = new URLSearchParams();
+  pBroad.set('track_name', title);
+  params.push(pBroad);
+
+  console.log('[Lyrics] Step 1: Structured search with', params.length, 'param sets (parallel)');
+
+  const results = await Promise.allSettled(
+    params.map(async (p) => {
+      const url = `https://lrclib.net/api/search?${p.toString()}`;
+      const resp = await fetch(url, { headers: LRCLIB_HEADERS });
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return Array.isArray(data) ? data : [];
+    })
+  );
+
+  // Collect and deduplicate
+  const seenIds = new Set<number>();
+  const pool: any[] = [];
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue;
+    for (const item of r.value) {
+      if (item.id && !seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        pool.push(item);
+      }
     }
   }
 
-  console.log('[Lyrics-Direct] Step 1: Trying /api/get with', getAttempts.length, 'param sets (parallel)');
+  console.log('[Lyrics] Step 1: Got', pool.length, 'unique results,',
+    pool.filter((p: any) => p.syncedLyrics).length, 'synced');
 
-  // Fire ALL /api/get attempts in parallel. Most will 404 (expected) --
-  // the one that matches comes back in ~200ms regardless of how many
-  // others are failing simultaneously. This replaces the old serial loop
-  // which took 200-500ms PER attempt, meaning 12 attempts = 2-6 seconds
-  // of pure wait-for-404 time before /api/search could even start.
-  type GetHit = { lyrics: LyricLine[]; script: Script; trackName: string; artistName: string };
-  const getResults = await Promise.allSettled(
-    getAttempts.map(async (params): Promise<GetHit | null> => {
+  if (pool.length === 0) return null;
+  return pickBestResult(pool, title, duration, language);
+}
+
+// =============================================================================
+// STEP 2: /api/get with artist permutations (parallel)
+// =============================================================================
+
+async function step2GetWithArtistPermutations(
+  title: string, artist?: string, language?: string,
+): Promise<RankedResult | null> {
+  if (!artist) return null;
+
+  const fullArtist = artist.trim();
+  const individuals = fullArtist
+    .split(/[,&]/)
+    .map(a => a.trim())
+    .filter(a => a.length > 0)
+    .slice(0, 3);
+
+  // Build all artist_name strings to try:
+  // 1. Full original unsplit string
+  // 2. All permutations of all 3 (joined by ", ")
+  // 3. All permutations of all pairs (joined by ", ")
+  // 4. All singles
+  const artistStrings = new Set<string>();
+  artistStrings.add(fullArtist);
+
+  if (individuals.length >= 2) {
+    // All permutations of the full set
+    for (const perm of permutations(individuals)) {
+      artistStrings.add(perm.join(', '));
+    }
+    // All pairs
+    for (let i = 0; i < individuals.length; i++) {
+      for (let j = 0; j < individuals.length; j++) {
+        if (i !== j) artistStrings.add(`${individuals[i]}, ${individuals[j]}`);
+      }
+    }
+  }
+  // All singles
+  for (const a of individuals) {
+    artistStrings.add(a);
+  }
+
+  const attempts = Array.from(artistStrings);
+  console.log('[Lyrics] Step 2: /api/get with', attempts.length, 'artist permutations (parallel)');
+
+  const results = await Promise.allSettled(
+    attempts.map(async (art): Promise<RankedResult | null> => {
       try {
-        const url = `https://lrclib.net/api/get?${params}`;
-        const resp = await fetch(url, { headers: LRCLIB_HEADERS });
+        const p = new URLSearchParams();
+        p.set('track_name', title);
+        p.set('artist_name', art);
+        const resp = await fetch(`https://lrclib.net/api/get?${p.toString()}`, { headers: LRCLIB_HEADERS });
         if (!resp.ok) return null;
         const data = await resp.json();
         if (data?.syncedLyrics) {
@@ -199,67 +303,62 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
     })
   );
 
-  const getHits = getResults
-    .filter((r): r is PromiseFulfilledResult<GetHit> => r.status === 'fulfilled' && r.value !== null)
+  const hits = results
+    .filter((r): r is PromiseFulfilledResult<RankedResult> => r.status === 'fulfilled' && r.value !== null)
     .map(r => r.value!);
 
-  if (getHits.length > 0) {
-    getHits.sort((a, b) => scriptPenalty(a.script, language) - scriptPenalty(b.script, language));
-    const best = getHits[0];
-    console.log('[Lyrics-Direct] /api/get HIT (' + best.script + '):', best.trackName, 'by', best.artistName, '-', best.lyrics.length, 'lines');
-    return best.lyrics;
+  if (hits.length === 0) {
+    console.log('[Lyrics] Step 2: All', attempts.length, 'permutations returned 404');
+    return null;
   }
-  console.log('[Lyrics-Direct] /api/get: all', getAttempts.length, 'attempts returned 404, falling back to /api/search');
 
-  // -- Step 2: Fall back to /api/search (free-text, batched) ----------
-  // Build query list -- ordered from most specific to broadest.
-  // Batches of 2, early exit when synced lyrics found.
+  // Pick best by script preference
+  hits.sort((a, b) => scriptPenalty(a.script, language) - scriptPenalty(b.script, language));
+  const best = hits[0];
+  console.log('[Lyrics] Step 2: HIT (' + best.script + '):', best.trackName, 'by', best.artistName, '-', best.lyrics.length, 'lines');
+  return best;
+}
+
+// =============================================================================
+// STEP 3: Free-text /api/search?q= (batched, last resort)
+// =============================================================================
+
+async function step3FreeTextSearch(
+  title: string, artist?: string, duration?: number, language?: string,
+): Promise<RankedResult | null> {
+  const words = title.split(/\s+/);
+  const trimmedWords = words.map(w => w.length > 4 ? w.slice(0, -1) : w);
+  const trimmedTitle = trimmedWords.join(' ');
+
   const queries: string[] = [];
-  // Batch 1: full title + artist, full title
   if (artist) queries.push(`${title} ${artist}`);
   queries.push(title);
-  // Batch 2: trimmed title (Hindi variants), first 3 words
   if (trimmedTitle !== title) queries.push(trimmedTitle);
   if (words.length > 3) queries.push(words.slice(0, 3).join(' '));
-  // Batch 3: first 2 words, trimmed first 3 words
   if (words.length > 2) queries.push(words.slice(0, 2).join(' '));
-  if (words.length > 3) {
-    const t3 = trimmedWords.slice(0, 3).join(' ');
-    if (t3 !== words.slice(0, 3).join(' ')) queries.push(t3);
-  }
 
-  console.log('[Lyrics-Direct] Searching LRCLIB with', queries.length, 'queries:', queries);
+  console.log('[Lyrics] Step 3: Free-text search with', queries.length, 'queries (batched)');
 
-  const fetchFns = queries.map(q => async () => {
-    const url = `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`;
-    console.log('[Lyrics-Direct] Fetching:', url);
-    const resp = await fetch(url, { headers: LRCLIB_HEADERS });
-    console.log('[Lyrics-Direct] Response for q="' + q + '":', resp.status, resp.statusText);
-    if (!resp.ok) return [];
-    const text = await resp.text();
-    let data: any[];
-    try { data = JSON.parse(text); } catch { return []; }
-    if (!Array.isArray(data)) return [];
-    console.log('[Lyrics-Direct] Got', data.length, 'results for q="' + q + '"',
-      '| synced:', data.filter((d: any) => d.syncedLyrics).length,
-      '| plain:', data.filter((d: any) => d.plainLyrics && !d.syncedLyrics).length);
-    return data;
-  });
-
-  // Run 2 at a time. Stop as soon as any batch finds synced lyrics.
   const seenIds = new Set<number>();
   const synced: any[] = [];
   const plain: any[] = [];
 
-  for (let i = 0; i < fetchFns.length; i += 2) {
-    const batch = fetchFns.slice(i, i + 2);
-    const settled = await Promise.allSettled(batch.map(fn => fn()));
+  for (let i = 0; i < queries.length; i += 2) {
+    const batch = queries.slice(i, i + 2);
+    const settled = await Promise.allSettled(
+      batch.map(async (q) => {
+        const resp = await fetch(
+          `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`,
+          { headers: LRCLIB_HEADERS },
+        );
+        if (!resp.ok) return [];
+        const data = await resp.json();
+        return Array.isArray(data) ? data : [];
+      })
+    );
 
     for (const r of settled) {
-      if (r.status === 'rejected') {
-        console.warn('[Lyrics-Direct] Query rejected:', r.reason?.message || 'unknown');
-        continue;
-      }
+      if (r.status !== 'fulfilled') continue;
       for (const item of r.value) {
         if (!item.id || seenIds.has(item.id)) continue;
         seenIds.add(item.id);
@@ -269,46 +368,46 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
     }
 
     if (synced.length > 0) {
-      console.log('[Lyrics-Direct] Found', synced.length, 'synced in batch', Math.floor(i/2)+1, '-- skipping remaining batches');
+      console.log('[Lyrics] Step 3: Found', synced.length, 'synced in batch', Math.floor(i/2)+1, '-- skipping remaining');
       break;
     }
   }
 
-  console.log('[Lyrics-Direct] Results:', synced.length, 'synced,', plain.length, 'plain-only');
+  console.log('[Lyrics] Step 3: Results:', synced.length, 'synced,', plain.length, 'plain-only');
 
   const pool = synced.length > 0 ? synced : plain;
-  if (pool.length === 0) return [];
+  if (pool.length === 0) return null;
+  return pickBestResult(pool, title, duration, language);
+}
 
-  const titleLower = title.toLowerCase();
-  const titleWords = titleLower.split(/\s+/);
-  let best: any = null;
-  let bestScript: Script = 'unknown';
-  let bestScore = Infinity;
+// =============================================================================
+// MAIN PIPELINE
+// =============================================================================
 
-  for (const item of pool.slice(0, 25)) {
-    const name = (item.trackName || '').toLowerCase();
-    const matched = titleWords.filter(w => name.includes(w)).length;
-    const dist = titleWords.length - matched;
-    const durPen = duration && item.duration ? Math.abs(item.duration - duration) * 0.05 : 0;
-    const lyricsText = item.syncedLyrics || item.plainLyrics || '';
-    const script = detectScript(lyricsText);
-    const scriptPen = scriptPenalty(script, language);
-    const s = dist + durPen + scriptPen;
-    if (s < bestScore) { bestScore = s; best = item; bestScript = script; }
+async function searchLRCLIB(
+  title: string, artist?: string, album?: string, duration?: number, language?: string,
+): Promise<LyricLine[]> {
+  // Step 1: Structured search (no artist, most reliable for Bollywood)
+  const step1 = await step1StructuredSearch(title, album, duration, language);
+  if (step1 && step1.lyrics.length > 0) {
+    console.log('[Lyrics] Step 1 SUCCESS (' + step1.script + '):', step1.trackName, '-', step1.lyrics.length, 'lines');
+    return step1.lyrics;
   }
 
-  if (!best) return [];
+  // Step 2: /api/get with all artist permutations
+  const step2 = await step2GetWithArtistPermutations(title, artist, language);
+  if (step2 && step2.lyrics.length > 0) {
+    console.log('[Lyrics] Step 2 SUCCESS (' + step2.script + '):', step2.trackName, '-', step2.lyrics.length, 'lines');
+    return step2.lyrics;
+  }
 
-  if (best.syncedLyrics) {
-    const lyrics = parseLRC(best.syncedLyrics);
-    console.log('[Lyrics-Direct] Using SYNCED (' + bestScript + '):', best.trackName, 'by', best.artistName, '-', lyrics.length, 'lines');
-    return lyrics;
+  // Step 3: Free-text search (last resort)
+  const step3 = await step3FreeTextSearch(title, artist, duration, language);
+  if (step3 && step3.lyrics.length > 0) {
+    console.log('[Lyrics] Step 3 SUCCESS (' + step3.script + '):', step3.trackName, '-', step3.lyrics.length, 'lines');
+    return step3.lyrics;
   }
-  if (best.plainLyrics) {
-    const lyrics = plainToLyricLines(best.plainLyrics);
-    console.log('[Lyrics-Direct] Using PLAIN (auto-timed,', bestScript + '):', best.trackName, 'by', best.artistName, '-', lyrics.length, 'lines');
-    return lyrics;
-  }
+
   return [];
 }
 
@@ -317,7 +416,7 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
 export async function fetchLyricsCached(args: FetchArgs): Promise<{ lyrics: LyricLine[] }> {
   const key = cacheKey(args);
 
-  // 1. In-memory cache (survives within a single page session)
+  // 1. In-memory cache
   if (cache.has(key)) {
     const cached = cache.get(key);
     if (cached?.lyrics?.length > 0) {
@@ -327,20 +426,20 @@ export async function fetchLyricsCached(args: FetchArgs): Promise<{ lyrics: Lyri
     cache.delete(key);
   }
 
-  // 2. IndexedDB cache (survives across sessions / page reloads)
+  // 2. IndexedDB cache
   try {
     const idbLyrics = await getCachedLyrics(key);
     if (idbLyrics && idbLyrics.length > 0) {
       console.log('[Lyrics] IndexedDB cache HIT:', idbLyrics.length, 'lines');
       const result = { lyrics: idbLyrics };
-      cache.set(key, result); // promote to in-memory for this session
+      cache.set(key, result);
       return result;
     }
   } catch (e) {
     console.warn('[Lyrics] IndexedDB read failed (non-fatal):', e);
   }
 
-  // 3. Deduplicate in-flight requests (Index.tsx + Sing.tsx call simultaneously)
+  // 3. Deduplicate in-flight requests
   if (inFlight.has(key)) {
     console.log('[Lyrics] Joining in-flight request for:', args.title);
     return inFlight.get(key)!;
@@ -349,17 +448,15 @@ export async function fetchLyricsCached(args: FetchArgs): Promise<{ lyrics: Lyri
   const promise = (async (): Promise<{ lyrics: LyricLine[] }> => {
     let lyrics: LyricLine[] = [];
 
-    // Go straight to direct LRCLIB (edge function returns empty, wastes 30s)
     try {
-      lyrics = await searchLRCLIBDirect(args.title, args.artist, args.album, args.duration, args.language);
+      lyrics = await searchLRCLIB(args.title, args.artist, args.album, args.duration, args.language);
     } catch (e) {
-      console.warn('[Lyrics] Direct LRCLIB failed:', (e as Error).message);
+      console.warn('[Lyrics] Pipeline failed:', (e as Error).message);
     }
 
     const result = { lyrics };
     if (lyrics.length > 0) {
       cache.set(key, result);
-      // Background save to IndexedDB -- fire and forget, never blocks
       cacheLyrics(key, lyrics).catch(() => {});
       console.log('[Lyrics] SUCCESS:', lyrics.length, 'lines for', args.title);
     } else {
