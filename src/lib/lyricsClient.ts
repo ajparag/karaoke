@@ -131,14 +131,22 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
   // Uses title + artist + album + duration for precise lookup.
   // Returns a single result, no ranking needed.
   // artist_name is REQUIRED by /api/get (400 without it).
-  // Try up to 3 artists (Saavn often lists multiple for duets/collabs).
-  // For each artist, progressively drop album/duration to broaden the match.
-  // LRCLIB might store the song under any of the credited artists.
-  const artists = (artist || '')
+  // LRCLIB does EXACT matching on artist_name. The tricky part: LRCLIB
+  // might store the artist as the FULL combined string from the original
+  // source (e.g. "Pritam, Neeraj Shridhar, Kavita Seth") OR under just
+  // one individual singer's name (e.g. "Neeraj Shridhar"). We don't know
+  // which, so we try BOTH: the full unsplit string first (most likely to
+  // match since many LRCLIB entries mirror the source's exact artist
+  // field), then individual artists as fallbacks.
+  const fullArtist = (artist || '').trim();
+  const individualArtists = fullArtist
     .split(/[,&]/)
     .map(a => a.trim())
     .filter(a => a.length > 0)
-    .slice(0, 3); // max 3 artists
+    .slice(0, 3); // max 3 individual artists
+
+  // Full string first, then individuals -- deduplicated via the 'seen' set
+  const artists = [fullArtist, ...individualArtists].filter(a => a.length > 0);
 
   const getAttempts: string[] = [];
   const seen = new Set<string>();
@@ -163,47 +171,45 @@ async function searchLRCLIBDirect(title: string, artist?: string, album?: string
     }
   }
 
-  console.log('[Lyrics-Direct] Step 1: Trying /api/get with', getAttempts.length, 'param sets');
+  console.log('[Lyrics-Direct] Step 1: Trying /api/get with', getAttempts.length, 'param sets (parallel)');
 
-  // Collect every /api/get hit rather than returning on the first one.
-  // For Hindi songs, LRCLIB may have both a Devanagari and a Latin/Gurmukhi
-  // entry matching the same params -- we want the Devanagari version.
-  // If the very first hit is already Devanagari (or language isn't Hindi),
-  // stop early -- no need to burn through all 12 attempts.
-  const getHits: { lyrics: LyricLine[]; script: Script; trackName: string; artistName: string }[] = [];
-
-  for (const params of getAttempts) {
-    try {
-      const url = `https://lrclib.net/api/get?${params}`;
-      const resp = await fetch(url, { headers: LRCLIB_HEADERS });
-      if (resp.ok) {
+  // Fire ALL /api/get attempts in parallel. Most will 404 (expected) --
+  // the one that matches comes back in ~200ms regardless of how many
+  // others are failing simultaneously. This replaces the old serial loop
+  // which took 200-500ms PER attempt, meaning 12 attempts = 2-6 seconds
+  // of pure wait-for-404 time before /api/search could even start.
+  type GetHit = { lyrics: LyricLine[]; script: Script; trackName: string; artistName: string };
+  const getResults = await Promise.allSettled(
+    getAttempts.map(async (params): Promise<GetHit | null> => {
+      try {
+        const url = `https://lrclib.net/api/get?${params}`;
+        const resp = await fetch(url, { headers: LRCLIB_HEADERS });
+        if (!resp.ok) return null;
         const data = await resp.json();
         if (data?.syncedLyrics) {
           const script = detectScript(data.syncedLyrics);
-          const lyrics = parseLRC(data.syncedLyrics);
-          console.log('[Lyrics-Direct] /api/get HIT (synced,', script + '):', data.trackName, 'by', data.artistName, '-', lyrics.length, 'lines');
-          getHits.push({ lyrics, script, trackName: data.trackName, artistName: data.artistName });
-          if (scriptPenalty(script, language) === 0) break; // already ideal script, stop searching
-        } else if (data?.plainLyrics) {
-          const script = detectScript(data.plainLyrics);
-          const lyrics = plainToLyricLines(data.plainLyrics);
-          console.log('[Lyrics-Direct] /api/get HIT (plain,', script + '):', data.trackName, 'by', data.artistName, '-', lyrics.length, 'lines');
-          getHits.push({ lyrics, script, trackName: data.trackName, artistName: data.artistName });
-          if (scriptPenalty(script, language) === 0) break;
+          return { lyrics: parseLRC(data.syncedLyrics), script, trackName: data.trackName, artistName: data.artistName };
         }
-      }
-    } catch (e) {
-      // /api/get returns 404 when not found -- that's expected, continue
-    }
-  }
+        if (data?.plainLyrics) {
+          const script = detectScript(data.plainLyrics);
+          return { lyrics: plainToLyricLines(data.plainLyrics), script, trackName: data.trackName, artistName: data.artistName };
+        }
+        return null;
+      } catch { return null; }
+    })
+  );
+
+  const getHits = getResults
+    .filter((r): r is PromiseFulfilledResult<GetHit> => r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value!);
 
   if (getHits.length > 0) {
     getHits.sort((a, b) => scriptPenalty(a.script, language) - scriptPenalty(b.script, language));
     const best = getHits[0];
-    console.log('[Lyrics-Direct] /api/get best pick:', best.trackName, 'by', best.artistName, '(' + best.script + ')');
+    console.log('[Lyrics-Direct] /api/get HIT (' + best.script + '):', best.trackName, 'by', best.artistName, '-', best.lyrics.length, 'lines');
     return best.lyrics;
   }
-  console.log('[Lyrics-Direct] /api/get found nothing, falling back to /api/search');
+  console.log('[Lyrics-Direct] /api/get: all', getAttempts.length, 'attempts returned 404, falling back to /api/search');
 
   // -- Step 2: Fall back to /api/search (free-text, batched) ----------
   // Build query list -- ordered from most specific to broadest.
