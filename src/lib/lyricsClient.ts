@@ -118,6 +118,57 @@ function scriptPenalty(script: Script, language?: string): number {
 
 const LRCLIB_HEADERS = { 'Lrclib-Client': 'KaraokeParty (https://karaokeparty.in)' };
 
+// --- Title/album cleanup for Saavn conventions ----------------------------
+// Saavn appends "(From "MovieName")" to virtually every Bollywood movie
+// soundtrack title. LRCLIB never stores titles this way -- it just has
+// "Phir Mohabbat", not "Phir Mohabbat (From "Murder 2")". Worse, the
+// URL-encoded quotes in the suffix can cause LRCLIB's server to return
+// 500/504 (which Chrome surfaces as a CORS error since error responses
+// often lack CORS headers).
+//
+// Additionally, Saavn's album field often points to a compilation album
+// (e.g. "Timeless Love Tunes") rather than the original movie album
+// ("Murder 2"). The movie name inside the (From "...") suffix is almost
+// always more accurate for LRCLIB matching than Saavn's own album field.
+
+interface CleanedTrackInfo {
+  cleanTitle: string;
+  betterAlbum: string | undefined; // extracted from (From "..."), or original album
+}
+
+function cleanSaavnTitle(rawTitle: string, saavnAlbum?: string): CleanedTrackInfo {
+  // Match patterns like:
+  //   (From "Murder 2")  (From 'Murder 2')  (From Murder 2)
+  //   [From "Murder 2"]  - From "Murder 2"
+  // Case-insensitive, handles both quote styles and no quotes
+  const fromMatch = rawTitle.match(
+    /\s*[\(\[\-]+\s*from\s+["']?([^"'\)\]]+?)["']?\s*[\)\]]?\s*$/i
+  );
+
+  let cleanTitle = rawTitle;
+  let betterAlbum = saavnAlbum;
+
+  if (fromMatch) {
+    // Strip the entire "(From ...)" suffix from the title
+    cleanTitle = rawTitle.slice(0, fromMatch.index!).trim();
+    // Use the extracted movie name as the album (more accurate than Saavn's)
+    const extractedAlbum = fromMatch[1].trim();
+    if (extractedAlbum.length > 0) {
+      betterAlbum = extractedAlbum;
+    }
+  }
+
+  // Also strip other common Saavn suffixes that LRCLIB won't have
+  cleanTitle = cleanTitle
+    .replace(/\s*\(.*?(Remix|Unplugged|Reprise|Remaster|Version|Lo-?fi|Slowed|Reverb).*?\)\s*$/i, '')
+    .trim();
+
+  // If stripping left us with nothing (shouldn't happen, but safety), use original
+  if (cleanTitle.length === 0) cleanTitle = rawTitle;
+
+  return { cleanTitle, betterAlbum };
+}
+
 interface RankedResult {
   lyrics: LyricLine[];
   script: Script;
@@ -385,8 +436,17 @@ async function step3FreeTextSearch(
 // =============================================================================
 
 async function searchLRCLIB(
-  title: string, artist?: string, album?: string, duration?: number, language?: string,
+  rawTitle: string, artist?: string, rawAlbum?: string, duration?: number, language?: string,
 ): Promise<LyricLine[]> {
+  // Clean up Saavn-specific title conventions before any API calls.
+  // "(From "Murder 2")" is stripped from the title and used as a better
+  // album name than Saavn's own album field (which often points to a
+  // compilation rather than the original soundtrack).
+  const { cleanTitle: title, betterAlbum: album } = cleanSaavnTitle(rawTitle, rawAlbum);
+  if (title !== rawTitle || album !== rawAlbum) {
+    console.log('[Lyrics] Title cleanup:', rawTitle, '->', title, '| Album:', rawAlbum, '->', album);
+  }
+
   // Step 1: Structured search (no artist, most reliable for Bollywood)
   const step1 = await step1StructuredSearch(title, album, duration, language);
   if (step1 && step1.lyrics.length > 0) {
