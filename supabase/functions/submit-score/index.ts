@@ -90,12 +90,11 @@ serve(async (req) => {
         Deno.env.get("SUPABASE_ANON_KEY")!,
         { global: { headers: { Authorization: authHeader } } }
       );
-      const token = authHeader.replace("Bearer ", "");
-      const { data: claimsData } = await authClient.auth.getClaims(token);
-      userId = claimsData?.claims?.sub ?? null;
-      // A present-but-invalid/expired token is NOT treated as a hard
-      // failure -- it just falls through to the anonymous path below,
-      // same as if no token had been sent at all.
+      // getUser() is the stable method available in all supabase-js v2.x.
+      // getClaims() was used before but is unstable/unavailable in some
+      // versions and was causing the 500 crash.
+      const { data: userData } = await authClient.auth.getUser();
+      userId = userData?.user?.id ?? null;
     }
 
     const body = await req.json();
@@ -188,8 +187,14 @@ serve(async (req) => {
 
     return json({ id: data.id });
   } catch (error) {
+    // Log the FULL error so Supabase function logs show the real cause
+    // (Postgres constraint violation, auth issue, etc.) rather than just
+    // the generic wrapper message.
+    console.error("[submit-score] Error:", error);
+    if (error instanceof Error) {
+      console.error("[submit-score] Stack:", error.stack);
+    }
     const message = error instanceof Error ? error.message : "Failed to submit score";
-    console.error("[submit-score] Error:", message);
-    return json({ error: "Failed to submit score" }, 500);
+    return json({ error: message }, 500);
   }
 });
