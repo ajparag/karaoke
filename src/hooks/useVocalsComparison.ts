@@ -178,7 +178,7 @@ const REF_PARTIAL_CREDIT_NO_USERPITCH = 25;
 const ONSET_DEBOUNCE_MS = 100;
 const REF_BUFFER_TIMEOUT_MS = 4000;       // soft checkpoint — logs a warning, does not give up
 const REF_BUFFER_HARD_TIMEOUT_MS = 15000; // hard ceiling — actually gives up here
-const LOG_EVERY_N_FRAMES = 600;     // ~once per 10 seconds at 60fps — reduces log volume
+const LOG_EVERY_N_FRAMES = 36000;  // ~10 min at 60fps     // ~once per 10 seconds at 60fps — reduces log volume
 
 // =============================================================================
 // DIAGNOSTIC SYSTEM
@@ -1049,10 +1049,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
 
   // ─── resetScores: full song-change reset, including reference teardown ────
 
-  const resetScores = useCallback(() => {
-    console.log('[HOOK] resetScores — full reset for new song');
-    teardownReferenceAudio();
-
+  const resetAccumulators = useCallback(() => {
     pitchScoreAccRef.current = 0;
     pitchFramesRef.current = 0;
     missedFramesRef.current = 0;
@@ -1067,13 +1064,18 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     prevRefSilentRef.current = true;
     lastUserOnsetRef.current = 0;
     lastRefOnsetRef.current = 0;
-    lastIsPlayingRef.current = undefined;
-
+    prevReferenceActiveRef.current = false;
     setMetrics({
       pitchMatch: 0, rhythmMatch: 0, techniqueMatch: 0,
       volume: 0, isVoiceDetected: false, referenceActive: false,
     });
-  }, [teardownReferenceAudio]);
+  }, []);
+
+  const resetScores = useCallback(() => {
+    teardownReferenceAudio();
+    resetAccumulators();
+    lastIsPlayingRef.current = undefined;
+  }, [teardownReferenceAudio, resetAccumulators]);
 
   // ─── setRefVolume: intentional no-op ───────────────────────────────────────
   // Kept for backward API compatibility with existing Sing.tsx call sites.
@@ -1116,6 +1118,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     startAnalysis,
     stopAnalysis,
     resetScores,
+    resetAccumulators,
     setRefVolume,
   };
 }
