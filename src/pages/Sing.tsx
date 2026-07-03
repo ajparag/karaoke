@@ -28,6 +28,7 @@ import { Slider } from "@/components/ui/slider";
 import { useVocalSeparation } from "@/hooks/useVocalSeparation";
 import { AudioDebugOverlay } from "@/components/karaoke/AudioDebugOverlay";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
+import { analyzeVocalActivity, getLineSingingDuration, type VocalInterval } from "@/lib/vocalActivityAnalyzer";
 import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
 import { saveCachedTracks } from "@/lib/audioCache";
 
@@ -111,6 +112,7 @@ const Sing = () => {
   // Lyrics search dialog state
   // Lyrics: fetched silently in background. No dialog/popup.
   const [lyricsNotFound, setLyricsNotFound] = useState(false);
+  const [vocalIntervals, setVocalIntervals] = useState<VocalInterval[] | null>(null);
   
   // Main instrumental audio
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -245,7 +247,34 @@ const Sing = () => {
     perTrackResetRef.current = track.audioUrl;
     cachingTriggeredRef.current = false;
     lastCheckpointAtSecondsRef.current = 0;
+    setVocalIntervals(null); // reset for new track
   }, [track?.audioUrl]);
+
+  // -- Vocal activity analysis for accurate lyric highlighting --------
+  // Runs once per song when the vocals stem URL becomes available.
+  // Decodes the full audio buffer and scans it for vocal energy to build
+  // a precise timeline of "singer is singing" vs "instrumental gap."
+  // The result is used by the highlight renderer below to compute how
+  // long each lyric line actually takes to sing, so the pink highlight
+  // finishes promptly when the vocals stop instead of crawling through
+  // instrumental gaps.
+  const vocalAnalysisTriggeredRef = useRef<string | null>(null);
+  useEffect(() => {
+    const vocalsUrl = separatedAudio?.vocalsUrl;
+    if (!vocalsUrl) return;
+    if (vocalAnalysisTriggeredRef.current === vocalsUrl) return;
+    vocalAnalysisTriggeredRef.current = vocalsUrl;
+
+    // Fire in the background -- never blocks playback or scoring
+    analyzeVocalActivity(vocalsUrl).then((intervals) => {
+      if (intervals && intervals.length > 0) {
+        setVocalIntervals(intervals);
+        console.log('[Sing] Vocal activity analysis complete:', intervals.length, 'intervals');
+      }
+    }).catch(() => {
+      // Non-fatal -- highlight falls back to the LRC gap-based estimate
+    });
+  }, [separatedAudio?.vocalsUrl]);
 
   // Initialize HTML5 Audio Player - Demucs instrumental or fallback to original
   useEffect(() => {
@@ -1328,12 +1357,25 @@ const Sing = () => {
                 const isPast = actualIndex < currentLineIndex;
 
                 const nextLine = lyrics[actualIndex + 1];
-                const effectiveDuration =
-                  line.duration && line.duration > 0
-                    ? line.duration
-                    : nextLine
-                      ? Math.max(0.25, nextLine.time - line.time)
-                      : Math.max(0.25, duration - line.time);
+                const lrcGapDuration = nextLine
+                  ? Math.max(0.25, nextLine.time - line.time)
+                  : Math.max(0.25, duration - line.time);
+
+                // If the vocal activity analysis has completed, use it to
+                // compute accurate singing duration for this line. The pink
+                // highlight finishes when the singer ACTUALLY stops singing,
+                // not at the next LRC timestamp (which could be 30+ seconds
+                // away across an instrumental break). Falls back to the
+                // LRC gap-based estimate if analysis hasn't completed yet
+                // or failed entirely.
+                const effectiveDuration = vocalIntervals
+                  ? getLineSingingDuration(
+                      line.time,
+                      nextLine?.time ?? null,
+                      vocalIntervals,
+                      lrcGapDuration,
+                    )
+                  : (line.duration && line.duration > 0 ? line.duration : lrcGapDuration);
 
                 const lineProgress = isCurrent
                   ? Math.min(1, Math.max(0, (currentTime - line.time) / effectiveDuration))
