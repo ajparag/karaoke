@@ -131,36 +131,69 @@ export async function analyzeVocalActivity(vocalsUrl: string): Promise<VocalInte
  * Given a lyric line's start time, finds the actual end of singing for that
  * line by looking at where the vocals go silent in the activity map.
  *
+ * KEY INSIGHT: we want the end of the FIRST contiguous vocal phrase that
+ * starts at/near this line's timestamp -- NOT the end of ALL vocal activity
+ * before the next LRC line. Within a single LRC line's time window there
+ * may be MULTIPLE separate vocal phrases (the singer finishes this line,
+ * there's an instrumental break, then starts the next phrase before the
+ * next LRC timestamp arrives). The highlight should finish after the FIRST
+ * phrase, not stretch across all of them.
+ *
+ * "Contiguous" means vocal intervals separated by less than PHRASE_GAP_MS
+ * are treated as part of the same phrase (accounts for brief breathing
+ * pauses mid-line that the RMS analysis kept as separate intervals).
+ *
  * @param lineStart - LRC timestamp (seconds) where this line begins
  * @param nextLineStart - LRC timestamp of the next line (or null if last line)
  * @param intervals - vocal activity intervals from analyzeVocalActivity()
- * @param fallbackDuration - duration to use if no interval matches (current LRC gap-based estimate)
+ * @param fallbackDuration - duration to use if no interval matches
  * @returns effective singing duration in seconds for this line
  */
+const PHRASE_GAP_S = 1.5; // gaps > 1.5s between intervals = separate phrases
+
 export function getLineSingingDuration(
   lineStart: number,
   nextLineStart: number | null,
   intervals: VocalInterval[],
   fallbackDuration: number,
 ): number {
-  // Find all intervals that overlap with [lineStart, nextLineStart)
   const maxEnd = nextLineStart ?? lineStart + fallbackDuration;
 
-  let lastVocalEnd = lineStart;
-  for (const iv of intervals) {
-    if (iv.end <= lineStart) continue;     // entirely before this line
-    if (iv.start >= maxEnd) break;         // entirely after this line's window
-    // This interval overlaps with the line's window
-    lastVocalEnd = Math.min(iv.end, maxEnd);
+  // Find the first interval that overlaps with or starts near lineStart.
+  // "Near" means within 0.5s after lineStart (LRC timestamps can be
+  // slightly early relative to the actual vocal onset).
+  let firstIdx = -1;
+  for (let i = 0; i < intervals.length; i++) {
+    const iv = intervals[i];
+    if (iv.end <= lineStart) continue;      // entirely before this line
+    if (iv.start >= maxEnd) break;          // entirely after this line's window
+    firstIdx = i;
+    break;
   }
 
-  // The effective duration is from lineStart to where vocals actually stop,
-  // with a small buffer (0.3s) so the highlight doesn't cut off abruptly
-  // at the exact last sample of audio energy.
-  const duration = lastVocalEnd - lineStart + 0.3;
+  if (firstIdx === -1) {
+    // No vocal activity found in this line's window at all.
+    // Use a short fallback so the highlight doesn't crawl.
+    const maxDuration = (nextLineStart ?? lineStart + fallbackDuration) - lineStart;
+    return Math.min(Math.max(0.5, fallbackDuration * 0.3), maxDuration);
+  }
 
-  // Clamp: at least 0.5s (even a very short phrase needs visible highlight
-  // time), and never longer than the full gap to the next line.
+  // Walk forward through consecutive intervals that are part of the SAME
+  // phrase (separated by less than PHRASE_GAP_S). Stop at the first real
+  // silence gap -- that's where a different phrase begins.
+  let phraseEnd = intervals[firstIdx].end;
+  for (let i = firstIdx + 1; i < intervals.length; i++) {
+    const iv = intervals[i];
+    if (iv.start >= maxEnd) break;          // past this line's window
+    if (iv.start - phraseEnd > PHRASE_GAP_S) break; // real gap = new phrase
+    phraseEnd = iv.end;
+  }
+
+  // Effective duration: from lineStart to where this phrase actually ends,
+  // with a small buffer (0.3s) so the highlight doesn't cut off abruptly.
+  const duration = Math.min(phraseEnd, maxEnd) - lineStart + 0.3;
+
+  // Clamp: at least 0.5s, never longer than the full gap to the next line.
   const maxDuration = (nextLineStart ?? lineStart + fallbackDuration) - lineStart;
   return Math.max(0.5, Math.min(duration, maxDuration));
 }
