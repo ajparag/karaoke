@@ -121,7 +121,8 @@ if (typeof window !== 'undefined') {
 // =============================================================================
 
 const MODAL_URL = 'https://ajparag--vocal-separator-v3-vocalseparator-ui.modal.run';
-const WARMUP_STALE_MS = 3 * 60 * 1000; // re-ping if >3 min since last warmup
+const MODAL_API_KEY = 'pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32';
+const WARMUP_STALE_MS = 1 * 60 * 1000; // re-ping if >1 min since last warmup
 
 let lastWarmupTs = 0;
 let warmUpPromise: Promise<void> | null = null;
@@ -246,7 +247,7 @@ export function useVocalSeparation() {
 
       const resp = await fetch(`${MODAL_URL}/separate-by-url`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': MODAL_API_KEY },
         body: JSON.stringify({ audio_url: audioUrl }),
       });
 
