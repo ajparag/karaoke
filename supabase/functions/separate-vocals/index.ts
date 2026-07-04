@@ -22,6 +22,7 @@ const corsHeaders = {
 };
 
 const MODAL_BASE = "https://ajparag--vocal-separator-v3-vocalseparator-ui.modal.run";
+const MODAL_API_KEY = "pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -42,6 +43,7 @@ serve(async (req) => {
         // during the real separation request instead.
         const resp = await fetch(`${MODAL_BASE}/`, {
           signal: AbortSignal.timeout(45000),
+          headers: { "x-api-key": MODAL_API_KEY },
         });
         console.log("[separate-vocals] Warmup status:", resp.status);
         return new Response(
