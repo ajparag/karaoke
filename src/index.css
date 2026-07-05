@@ -4,10 +4,68 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Indian Karaoke App - Vibrant Design System */
+/* KaraokeParty Design System
+   - Light theme by default (Index, Auth, Leaderboard, History)
+   - Dark theme on Sing page (forced via .dark class on container)
+*/
 
 @layer base {
+  /* ── LIGHT THEME (default) ─────────────────────────────────────── */
   :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 10%;
+
+    --card: 0 0% 97%;
+    --card-foreground: 240 10% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 10%;
+
+    --primary: 330 85% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 260 60% 55%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 5% 92%;
+    --muted-foreground: 240 5% 45%;
+
+    --accent: 45 95% 50%;
+    --accent-foreground: 240 10% 10%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 240 5% 85%;
+    --input: 240 5% 85%;
+    --ring: 330 85% 55%;
+
+    --radius: 0.75rem;
+
+    /* Score colors -- same in both themes */
+    --score-perfect: 45 95% 55%;
+    --score-great: 145 70% 50%;
+    --score-good: 200 80% 55%;
+    --score-ok: 35 90% 55%;
+    --score-miss: 0 70% 55%;
+
+    /* Karaoke bar colors */
+    --bar-background: 240 5% 88%;
+    --bar-progress: 330 85% 55%;
+    --bar-perfect: 45 95% 55%;
+    --bar-performance: 170 80% 45%;
+
+    /* Gradient definitions */
+    --gradient-primary: linear-gradient(135deg, hsl(330 85% 55%), hsl(260 60% 55%));
+    --gradient-gold: linear-gradient(135deg, hsl(45 95% 55%), hsl(35 90% 50%));
+    --gradient-performance: linear-gradient(90deg, hsl(330 85% 55%), hsl(170 80% 45%));
+
+    --shadow-glow: 0 0 40px hsl(330 85% 55% / 0.2);
+    --shadow-gold: 0 0 30px hsl(45 95% 55% / 0.3);
+  }
+
+  /* ── DARK THEME (Sing page, forced via .dark class) ────────────── */
+  .dark {
     --background: 240 10% 4%;
     --foreground: 0 0% 98%;
 
@@ -36,26 +94,15 @@
     --input: 240 10% 18%;
     --ring: 330 85% 60%;
 
-    --radius: 0.75rem;
-
-    /* Score colors */
-    --score-perfect: 45 95% 55%;
-    --score-great: 145 70% 50%;
-    --score-good: 200 80% 55%;
-    --score-ok: 35 90% 55%;
-    --score-miss: 0 70% 55%;
-    
-    /* Karaoke bar colors */
     --bar-background: 240 10% 20%;
     --bar-progress: 330 85% 60%;
     --bar-perfect: 45 95% 55%;
     --bar-performance: 170 80% 50%;
-    
-    /* Gradient definitions */
+
     --gradient-primary: linear-gradient(135deg, hsl(330 85% 60%), hsl(260 60% 55%));
     --gradient-gold: linear-gradient(135deg, hsl(45 95% 55%), hsl(35 90% 50%));
     --gradient-performance: linear-gradient(90deg, hsl(330 85% 60%), hsl(170 80% 50%));
-    
+
     --shadow-glow: 0 0 40px hsl(330 85% 60% / 0.4);
     --shadow-gold: 0 0 30px hsl(45 95% 55% / 0.5);
   }
@@ -78,82 +125,46 @@
 
   /* Full HD screens (1920px+) */
   @media (min-width: 1920px) {
-    html {
-      font-size: 18px;
-    }
-    
-    body {
-      font-size: 1.15rem;
-    }
-    
+    html { font-size: 18px; }
+    body { font-size: 1.15rem; }
     h1 { font-size: 3rem; }
     h2 { font-size: 2.5rem; }
     h3 { font-size: 1.75rem; }
     h4 { font-size: 1.35rem; }
-    
-    p, span, button, input, label {
-      font-size: 1.15rem;
-    }
+    p, span, button, input, label { font-size: 1.15rem; }
   }
 
   /* QHD / Ultrawide screens (2560px+) */
   @media (min-width: 2560px) {
-    html {
-      font-size: 20px;
-    }
-    
-    body {
-      font-size: 1.25rem;
-    }
-    
+    html { font-size: 20px; }
+    body { font-size: 1.25rem; }
     h1 { font-size: 3.5rem; }
     h2 { font-size: 2.75rem; }
     h3 { font-size: 2rem; }
     h4 { font-size: 1.5rem; }
-    
-    p, span, button, input, label {
-      font-size: 1.25rem;
-    }
+    p, span, button, input, label { font-size: 1.25rem; }
   }
 
   /* Ultrawide 21:9 screens (3440px+) */
   @media (min-width: 3440px) {
-    html {
-      font-size: 22px;
-    }
-    
-    body {
-      font-size: 1.35rem;
-    }
-    
+    html { font-size: 22px; }
+    body { font-size: 1.35rem; }
     h1 { font-size: 4rem; }
     h2 { font-size: 3rem; }
     h3 { font-size: 2.25rem; }
     h4 { font-size: 1.75rem; }
-    
-    p, span, button, input, label {
-      font-size: 1.35rem;
-    }
+    p, span, button, input, label { font-size: 1.35rem; }
   }
 
   /* 4K displays (3840px+) */
   @media (min-width: 3840px) {
-    html {
-      font-size: 26px;
-    }
-    
-    body {
-      font-size: 1.5rem;
-    }
-    
+    html { font-size: 26px; }
+    body { font-size: 1.5rem; }
     h1 { font-size: 5rem; }
     h2 { font-size: 4rem; }
     h3 { font-size: 2.75rem; }
     h4 { font-size: 2rem; }
-    
-    p, span, button, input, label {
-      font-size: 1.5rem;
-    }
+    p, span, button, input, label { font-size: 1.5rem; }
   }
 }
 
@@ -161,30 +172,30 @@
   .gradient-primary {
     background: var(--gradient-primary);
   }
-  
+
   .gradient-gold {
     background: var(--gradient-gold);
   }
-  
+
   .gradient-performance {
     background: var(--gradient-performance);
   }
-  
+
   .shadow-glow {
     box-shadow: var(--shadow-glow);
   }
-  
+
   .shadow-gold {
     box-shadow: var(--shadow-gold);
   }
-  
+
   .text-gradient {
     background: var(--gradient-primary);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
   }
-  
+
   .text-gradient-gold {
     background: var(--gradient-gold);
     -webkit-background-clip: text;
@@ -195,106 +206,49 @@
 
 /* Lyrics bar animations */
 @keyframes lyrics-scroll {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-100%);
-  }
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
 }
 
 @keyframes bar-fill {
-  from {
-    width: 0%;
-  }
-  to {
-    width: var(--fill-percent, 100%);
-  }
+  from { width: 0%; }
+  to { width: var(--fill-percent, 100%); }
 }
 
 @keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 20px hsl(var(--primary) / 0.4);
-  }
-  50% {
-    box-shadow: 0 0 40px hsl(var(--primary) / 0.7);
-  }
+  0%, 100% { box-shadow: 0 0 20px hsl(var(--primary) / 0.4); }
+  50% { box-shadow: 0 0 40px hsl(var(--primary) / 0.7); }
 }
 
 @keyframes beat-pulse {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
 }
 
 @keyframes score-pop {
-  0% {
-    transform: scale(0.5);
-    opacity: 0;
-  }
-  50% {
-    transform: scale(1.2);
-  }
-  100% {
-    transform: scale(1);
-    opacity: 1;
-  }
+  0% { transform: scale(0.5); opacity: 0; }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 @keyframes float-up {
-  0% {
-    transform: translateY(0) scale(1);
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(-50px) scale(1.5);
-    opacity: 0;
-  }
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-50px) scale(1.5); opacity: 0; }
 }
 
 @keyframes shimmer {
-  0% {
-    background-position: -200% 0;
-  }
-  100% {
-    background-position: 200% 0;
-  }
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
 
-.animate-lyrics-scroll {
-  animation: lyrics-scroll var(--scroll-duration, 5s) linear forwards;
-}
-
-.animate-bar-fill {
-  animation: bar-fill 0.3s ease-out forwards;
-}
-
-.animate-pulse-glow {
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
-.animate-beat-pulse {
-  animation: beat-pulse 0.5s ease-in-out;
-}
-
-.animate-score-pop {
-  animation: score-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-}
-
-.animate-float-up {
-  animation: float-up 0.8s ease-out forwards;
-}
-
+.animate-lyrics-scroll { animation: lyrics-scroll var(--scroll-duration, 5s) linear forwards; }
+.animate-bar-fill { animation: bar-fill 0.3s ease-out forwards; }
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-beat-pulse { animation: beat-pulse 0.5s ease-in-out; }
+.animate-score-pop { animation: score-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+.animate-float-up { animation: float-up 0.8s ease-out forwards; }
 .animate-shimmer {
-  background: linear-gradient(
-    90deg,
-    hsl(var(--muted)) 0%,
-    hsl(var(--border)) 50%,
-    hsl(var(--muted)) 100%
-  );
+  background: linear-gradient(90deg, hsl(var(--muted)) 0%, hsl(var(--border)) 50%, hsl(var(--muted)) 100%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
@@ -307,7 +261,6 @@
   border-radius: 4px;
   overflow: hidden;
 }
-
 .performance-bar::before {
   content: '';
   position: absolute;
@@ -331,7 +284,6 @@
   align-items: center;
   padding: 8px 20px;
 }
-
 .singing-bar-progress {
   position: absolute;
   left: 0;
@@ -340,7 +292,6 @@
   background: hsl(var(--bar-progress) / 0.3);
   transition: width 0.1s linear;
 }
-
 .singing-bar-performance {
   position: absolute;
   left: 0;
@@ -370,24 +321,10 @@
 }
 
 /* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground) / 0.3);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.5);
-}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: hsl(var(--muted)); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / 0.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
 
 /* Glass effect */
 .glass {
