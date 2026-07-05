@@ -16,7 +16,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Volume2, VolumeX, Search, Check, Loader2, Share2, X } from "lucide-react";
+import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Volume2, VolumeX, Search, Check, Loader2, Share2, X, Home } from "lucide-react";
 import { SeparationWaitScreen } from "@/components/SeparationWaitScreen";
 import { VocalsIcon } from "@/components/icons/VocalsIcon";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -83,6 +83,7 @@ const Sing = () => {
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [guestName, setGuestName] = useState('');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
   const [isMuted, setIsMuted] = useState(false);
@@ -819,6 +820,7 @@ const Sing = () => {
     preEndTriggeredRef.current = false;
     autoSaveTriggeredRef.current = false;
     setScoreSaveStatus('idle');
+    setGuestName('');
     separationStartedAtRef.current = null;
     setSeparationStartedAt(null);
     if (audioRef.current) {
@@ -1005,7 +1007,7 @@ const Sing = () => {
       // separate anonymous-session workaround needed.
       const displayName = (user && !user.is_anonymous)
         ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
-        : 'Guest';
+        : (guestName.trim() || 'Guest');
 
       const payload = {
         songTitle: track.title,
@@ -1036,16 +1038,21 @@ const Sing = () => {
     }
   }, [track, user, totalScore, duration, currentTime]);
 
-  // Trigger the auto-save exactly once, only when the song completes
-  // naturally (showResults only ever becomes true via onEnded / the
-  // timeupdate safety net -- exit-confirm and pause-checkpoint use their
-  // own separate state, so this never fires for a mid-song "Leave").
+  // Trigger the auto-save exactly once when the song completes naturally.
+  // For signed-in users: immediate. For anonymous (no user): delayed by
+  // 3 seconds so they have time to type their name in the input field
+  // before the save fires. The name input disappears once saving starts.
   useEffect(() => {
     if (showResults && !autoSaveTriggeredRef.current) {
       autoSaveTriggeredRef.current = true;
-      submitScoreToLeaderboard();
+      if (user) {
+        submitScoreToLeaderboard();
+      } else {
+        const timer = setTimeout(() => submitScoreToLeaderboard(), 3000);
+        return () => clearTimeout(timer);
+      }
     }
-  }, [showResults, submitScoreToLeaderboard]);
+  }, [showResults, submitScoreToLeaderboard, user]);
 
   const getScoreColor = (value: number) => {
     if (value >= 80) return 'bg-score-perfect';
@@ -1094,7 +1101,7 @@ const Sing = () => {
 
 
   return (
-    <div className="h-[100dvh] bg-background flex flex-col overflow-hidden">
+    <div className="dark h-[100dvh] bg-background flex flex-col overflow-hidden">
       {showAudioDebug ? (
         <AudioDebugOverlay
           debug={{
@@ -1237,8 +1244,22 @@ const Sing = () => {
                 <div className="text-center max-w-md">
                   {scoreBreakdown}
 
-                  {/* Auto-save status -- no button needed, this happens automatically
-                      for everyone (signed in or not) the moment the song ends. */}
+                  {/* Guest name input -- only for anonymous users, lets them
+                      add their name to the leaderboard before score auto-saves */}
+                  {!user && scoreSaveStatus === 'idle' && (
+                    <div className="mb-4 flex items-center justify-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Enter your name"
+                        value={guestName}
+                        onChange={(e) => setGuestName(e.target.value)}
+                        maxLength={30}
+                        className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  )}
+
+                  {/* Auto-save status */}
                   <div className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground min-h-[24px]">
                     {scoreSaveStatus === 'saving' && (
                       <>
@@ -1273,6 +1294,10 @@ const Sing = () => {
                     <Button variant="outline" size="lg" onClick={handleShareScore}>
                       <Share2 className="w-5 h-5 mr-2" />
                       Share
+                    </Button>
+                    <Button size="lg" className="gradient-primary text-primary-foreground" onClick={() => navigate('/')}>
+                      <Home className="w-5 h-5 mr-2" />
+                      Next
                     </Button>
                   </div>
                 </div>

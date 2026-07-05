@@ -26,7 +26,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Mic, Music, Trophy, Sparkles, Loader2, Play, Search, LogOut, User } from "lucide-react";
+import { Music, Trophy, Sparkles, Loader2, Play, Search, LogOut, User } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalSeparation, prefetchAudio, warmUpHFSpace } from "@/hooks/useVocalSeparation";
@@ -353,9 +353,11 @@ const Index = () => {
         <div className="relative z-10 text-center max-w-4xl mx-auto w-full">
           {/* Logo/Title */}
           <div className="mb-8 flex items-center justify-center gap-3">
-            <div className="p-4 rounded-2xl gradient-primary shadow-glow">
-              <Mic className="w-10 h-10 text-primary-foreground" />
-            </div>
+            <img
+              src="/karaoke-logo.png"
+              alt="KaraokeParty"
+              className="w-20 h-20 drop-shadow-lg"
+            />
           </div>
 
           <h1 className="text-5xl md:text-7xl font-bold mb-6 tracking-tight">
