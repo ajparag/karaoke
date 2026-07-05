@@ -403,8 +403,7 @@ const Index = () => {
           <p className="text-xl md:text-2xl text-muted-foreground mb-4 font-medium">Sing Bollywood, Tollywood & More</p>
 
           <p className="text-muted-foreground mb-8 max-w-2xl mx-auto">
-            Your ultimate Indian karaoke experience. Search instrumental tracks, follow synced lyrics, and get scored on
-            your vocal performance.
+            Pick any song. AI removes the singer in seconds. Lyrics light up as you sing. Get scored on pitch, rhythm and technique. Challenge your friends.
           </p>
 
           {/* Search Section */}
