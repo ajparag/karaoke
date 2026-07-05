@@ -26,7 +26,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Music, Trophy, Sparkles, Loader2, Play, Search, LogOut, User } from "lucide-react";
+import { Music, Trophy, Sparkles, Loader2, Play, Search, LogOut, User, Sun, Moon } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalSeparation, prefetchAudio, warmUpHFSpace } from "@/hooks/useVocalSeparation";
@@ -69,6 +69,30 @@ const Index = () => {
 
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
   const [trendingSongs, setTrendingSongs] = useState<string[]>([]);
+
+  // Theme toggle -- persisted in localStorage, defaults to light.
+  // Sing page forces dark independently; this only affects browse pages.
+  const [isDark, setIsDark] = useState(() => {
+    return localStorage.getItem('theme') === 'dark';
+  });
+
+  useEffect(() => {
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  }, [isDark]);
+
+  // Clean up: remove dark class when navigating away (Sing page manages its own)
+  useEffect(() => {
+    return () => {
+      if (!isDark) {
+        document.documentElement.classList.remove('dark');
+      }
+    };
+  }, [isDark]);
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
 
   // Clear any cached data on homepage load
@@ -310,8 +334,19 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      {/* Top-right auth widget */}
-      <div className="absolute top-4 right-4 z-20">
+      {/* Top-right controls: theme toggle + auth */}
+      <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setIsDark(d => !d)}
+          className="rounded-full"
+          aria-label="Toggle theme"
+        >
+          {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+        </Button>
+      </div>
+      <div className="absolute top-4 right-16 z-20">
         {user ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
