@@ -105,6 +105,144 @@ const Index = () => {
     };
   }, [isDark]);
 
+  const [isLoadingTrending, setIsLoadingTrending] = useState(true);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const pendingConfirmLeaveRef = useRef<(() => void) | null>(null);
+  const separationStartedAtRef = useRef<number | null>(null);
+  const [separationStartedAt, setSeparationStartedAt] = useState<number | null>(null);
+
+  // Back button guard: confirm before leaving if separation is in progress
+  useBackGuard((confirmLeave) => {
+    if (isSeparating) {
+      pendingConfirmLeaveRef.current = confirmLeave;
+      setShowLeaveConfirm(true);
+    } else {
+      confirmLeave();
+    }
+  });
+
+  // Fetch trending songs on mount
+  const currentYear = new Date().getFullYear();
+  const trendingQueries = [
+    `new hindi songs ${currentYear}`,
+    "latest bollywood hits",
+    `trending hindi songs ${currentYear}`,
+    `top hindi songs ${currentYear}`,
+    "bollywood new releases",
+    "hindi chart toppers",
+    "latest arijit singh songs",
+    `new romantic hindi songs ${currentYear}`,
+    "bollywood party songs",
+    `hindi love songs ${currentYear}`,
+  ];
+
+  useEffect(() => {
+    const fetchTrending = async () => {
+      try {
+        const shuffled = [...trendingQueries].sort(() => Math.random() - 0.5);
+        const picks = shuffled.slice(0, 3);
+        const results = await Promise.allSettled(
+          picks.map((q) =>
+            supabase.functions.invoke("search-music", { body: { query: q, limit: 15 } })
+          )
+        );
+        const allTracks: Track[] = [];
+        const seenIds = new Set<string>();
+        for (const r of results) {
+          if (r.status === "fulfilled" && !r.value.error && r.value.data?.tracks) {
+            for (const t of r.value.data.tracks as Track[]) {
+              if (!seenIds.has(t.id)) { seenIds.add(t.id); allTracks.push(t); }
+            }
+          }
+        }
+        const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000;
+        const recentTracks = allTracks.filter((t) => {
+          if (t.releaseDate) {
+            const ts = new Date(t.releaseDate).getTime();
+            if (!isNaN(ts) && ts >= ninetyDaysAgo) return true;
+          }
+          if (t.year && t.year >= currentYear - 1) return true;
+          return false;
+        });
+        const pool = recentTracks.length > 0 ? recentTracks : allTracks;
+        const sorted = pool.sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+        const titles = sorted
+          .map((t) => t.title.replace(/\(.*?\)/g, "").replace(/\[.*?\]/g, "").replace(/-.*$/, "").trim())
+          .filter((t: string, i: number, arr: string[]) => t.length > 0 && t.length < 25 && arr.indexOf(t) === i)
+          .slice(0, 3);
+        if (titles.length > 0) setTrendingSongs(titles);
+      } catch (error) {
+        console.error("Failed to fetch trending:", error);
+      } finally {
+        setIsLoadingTrending(false);
+      }
+    };
+    fetchTrending();
+  }, []);
+
+  // Search handler
+  const searchWithQuery = async (searchQuery: string) => {
+    if (!searchQuery.trim()) return;
+    setIsLoading(true);
+    setHasSearched(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("search-music", {
+        body: { query: searchQuery.trim(), limit: 20 },
+      });
+      if (error) throw error;
+      setTracks(data?.tracks || []);
+    } catch (error) {
+      console.error("Search failed:", error);
+      toast({ title: "Search failed", description: "Please try again", variant: "destructive" });
+      setTracks([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSearch = () => {
+    warmUpHFSpace();
+    searchWithQuery(query);
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") handleSearch();
+  };
+
+  // Track selection: start separation + lyrics prefetch, then navigate
+  const handleSelectTrack = (track: Track) => {
+    setSelectedTrack(track);
+    sessionStorage.setItem('selectedTrack', JSON.stringify(track));
+
+    // Prefetch lyrics in parallel with separation
+    sessionStorage.removeItem('prefetchedLyrics');
+    fetchLyricsCached({
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      duration: parseDurationToSeconds(track.duration),
+      language: track.language,
+    }).then(result => {
+      if (result?.lyrics?.length > 0) {
+        sessionStorage.setItem('prefetchedLyrics', JSON.stringify(result.lyrics));
+        console.log('[Index] Lyrics prefetched:', result.lyrics.length, 'lines');
+      }
+    }).catch(err => {
+      console.warn('[Index] Lyrics prefetch failed:', err?.message || err);
+    });
+
+    // Start AI vocal separation in the background
+    console.log('[Index] Starting background AI separation for:', track.title);
+    separateVocals(track.audioUrl).then((result) => {
+      if (result) {
+        console.log('[Index] Background AI separation complete:', result.fromCache ? 'cached' : 'newly processed');
+      }
+    });
+
+    // Navigate to sing page immediately
+    navigate(`/sing/${track.id}`);
+  };
+
   return (
     <div className="min-h-[100dvh] bg-background flex flex-col">
       {/* Leave confirmation dialog (back pressed during separation) */}
