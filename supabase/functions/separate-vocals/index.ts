@@ -21,7 +21,11 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const MODAL_BASE = "https://ajparag--vocal-separator-v3-vocalseparator-ui.modal.run";
+// Warmup only targets the FAST (A10G) tier -- that's the one live users
+// actually wait on (solo singing, first party song). The BACKGROUND (T4)
+// tier used for silent party pre-separation warms up naturally on its
+// first real call; no need to proactively ping it.
+const MODAL_BASE = "https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run";
 const MODAL_API_KEY = "pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32";
 
 serve(async (req) => {
