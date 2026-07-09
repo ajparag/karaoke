@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
+import { ThemeProvider } from "@/hooks/useTheme";
 import { useEffect } from "react";
 import { warmUpHFSpace } from "@/hooks/useVocalSeparation";
 import Index from "./pages/Index";
@@ -12,6 +13,10 @@ import Auth from "./pages/Auth";
 import Sing from "./pages/Sing";
 import Leaderboard from "./pages/Leaderboard";
 import History from "./pages/History";
+import CreateParty from "./pages/CreateParty";
+import JoinParty from "./pages/JoinParty";
+import PartyStage from "./pages/PartyStage";
+import PartyQueue from "./pages/PartyQueue";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -51,6 +56,7 @@ const App = () => {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
+        <ThemeProvider>
         <AuthProvider>
           <TooltipProvider>
             <Toaster />
@@ -62,11 +68,16 @@ const App = () => {
                 <Route path="/sing/:trackId" element={<Sing />} />
                 <Route path="/leaderboard" element={<Leaderboard />} />
                 <Route path="/history" element={<History />} />
+                <Route path="/party/host" element={<CreateParty />} />
+                <Route path="/party/join" element={<JoinParty />} />
+                <Route path="/party/:code/stage" element={<PartyStage />} />
+                <Route path="/party/:code/queue" element={<PartyQueue />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </HashRouter>
           </TooltipProvider>
         </AuthProvider>
+        </ThemeProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   );
