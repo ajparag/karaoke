@@ -290,10 +290,16 @@ const Index = () => {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem className="gap-2">
+                <DropdownMenuItem className="gap-2" disabled>
                   <User className="h-4 w-4" />
                   <span className="truncate">{user.email}</span>
                 </DropdownMenuItem>
+                <Link to="/profile">
+                  <DropdownMenuItem className="gap-2">
+                    <User className="h-4 w-4" />
+                    Profile
+                  </DropdownMenuItem>
+                </Link>
                 <DropdownMenuItem onClick={signOut} className="gap-2 text-destructive">
                   <LogOut className="h-4 w-4" />
                   Sign Out

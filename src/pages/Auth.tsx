@@ -29,7 +29,7 @@
 // =============================================================================
 
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -55,6 +55,13 @@ const signUpSchema = z.object({
 
 export default function Auth() {
   const navigate = useNavigate();
+  const location = useLocation();
+  // If the user was sent here from a specific page (e.g. "Sign in to
+  // host a party"), return them there after successful auth instead of
+  // always landing on the homepage.
+  const redirectTo = (location.state as { from?: string } | null)?.from
+    || sessionStorage.getItem('authRedirectTo')
+    || '/';
   const { isDark, toggleTheme } = useTheme();
   const { user, signIn, signUp, loading: authLoading } = useAuth();
   const { toast } = useToast();
@@ -71,9 +78,20 @@ export default function Auth() {
     // callback token has been exchanged, causing the redirect to be missed.
     if (authLoading) return;
     if (user) {
-      navigate('/');
+      sessionStorage.removeItem('authRedirectTo');
+      navigate(redirectTo);
     }
-  }, [user, navigate, authLoading]);
+  }, [user, navigate, authLoading, redirectTo]);
+
+  // Persist the intended destination in case the user goes through Google
+  // OAuth, which fully navigates away to Google and back -- location.state
+  // does not survive that trip, but sessionStorage does.
+  useEffect(() => {
+    const from = (location.state as { from?: string } | null)?.from;
+    if (from) {
+      sessionStorage.setItem('authRedirectTo', from);
+    }
+  }, [location.state]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();

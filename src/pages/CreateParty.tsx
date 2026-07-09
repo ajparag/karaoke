@@ -113,7 +113,7 @@ export default function CreateParty() {
                 </Button>
               </>
             ) : (
-              <Link to="/auth">
+              <Link to="/auth" state={{ from: "/party/host" }}>
                 <Button className="w-full gradient-primary text-primary-foreground">Sign In to Host</Button>
               </Link>
             )}

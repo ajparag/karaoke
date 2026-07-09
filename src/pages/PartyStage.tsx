@@ -227,7 +227,7 @@ export default function PartyStage() {
       song_artist: track.artist,
       thumbnail_url: track.thumbnail,
       audio_url: track.audioUrl,
-      duration_seconds: track.duration ? parseInt(track.duration, 10) || null : null,
+      duration_seconds: parseDurationToSeconds(track.duration) ?? null,
       language: track.language || null,
       album: track.album || null,
       singer_name: singerName,

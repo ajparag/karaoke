@@ -16,6 +16,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { getDeviceId, getGuestName } from "@/hooks/usePartyDevice";
+import { parseDurationToSeconds } from "@/lib/lyricsClient";
 import { ArrowLeft, Search, Music, Plus, X, Loader2, PartyPopper, Check } from "lucide-react";
 
 interface SearchTrack {
@@ -138,7 +139,7 @@ export default function PartyQueue() {
       song_artist: track.artist,
       thumbnail_url: track.thumbnail,
       audio_url: track.audioUrl,
-      duration_seconds: track.duration ? parseInt(track.duration, 10) || null : null,
+      duration_seconds: parseDurationToSeconds(track.duration) ?? null,
       language: track.language || null,
       album: track.album || null,
       singer_name: myName,
