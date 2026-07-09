@@ -31,6 +31,7 @@ import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { analyzeVocalActivity, getLineSingingDuration, type VocalInterval } from "@/lib/vocalActivityAnalyzer";
 import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
 import { saveCachedTracks } from "@/lib/audioCache";
+import { useWakeLock } from "@/hooks/useWakeLock";
 
 interface Track {
   id: string;
@@ -69,6 +70,11 @@ const Sing = () => {
   const [track, setTrack] = useState<Track | null>(null);
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Keep screen awake while actively singing. Held whenever the song is
+  // playing (isPlaying) -- released automatically when paused, when the
+  // song ends, or when navigating away (component unmount).
+  useWakeLock(isPlaying);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const trackDurationSecs = track?.duration ? parseDurationToSeconds(track.duration) ?? 0 : 0;
@@ -986,6 +992,25 @@ const Sing = () => {
   //     state, so a guest never appears "logged in" anywhere else. Their
   //     city/country is auto-detected server-side from their IP address
   //     since there's no profile to pull a location from.
+  // If this song was played inside a Party, "Next" returns to the host's
+  // Party Stage (so they can start the next queued song) instead of the
+  // homepage. Clears the party context marker either way so a later solo
+  // song doesn't accidentally get attributed to a stale party.
+  const handleNextClick = useCallback(() => {
+    const partyContextRaw = sessionStorage.getItem('activePartyContext');
+    sessionStorage.removeItem('activePartyContext');
+    if (partyContextRaw) {
+      try {
+        const { code } = JSON.parse(partyContextRaw);
+        if (code) {
+          navigate(`/party/${code}/stage`);
+          return;
+        }
+      } catch { /* fall through to homepage */ }
+    }
+    navigate('/');
+  }, [navigate]);
+
   const submitScoreToLeaderboard = useCallback(async () => {
     if (!track) return;
 
@@ -1030,6 +1055,27 @@ const Sing = () => {
 
       setScoreSaveStatus('saved');
       console.log('[Leaderboard] Score auto-saved:', totalScore, scoreRating);
+
+      // If this song was played as part of a Party (host-controlled stage),
+      // also write the score back to that stage's queue row so it shows up
+      // in the "Tonight's Scores" list on both the host and participant
+      // screens. Non-fatal if this fails -- the leaderboard save above is
+      // the source of truth; party display is a nice-to-have on top.
+      const partyContextRaw = sessionStorage.getItem('activePartyContext');
+      if (partyContextRaw) {
+        try {
+          const { queueId } = JSON.parse(partyContextRaw);
+          if (queueId) {
+            await supabase.from('stage_queue').update({
+              status: 'completed',
+              score: totalScore,
+              rating: scoreRating,
+            }).eq('id', queueId);
+          }
+        } catch (e) {
+          console.warn('[Party] Failed to write score back to stage:', e);
+        }
+      }
     } catch (error) {
       console.error('[Leaderboard] Auto-save failed:', error);
       setScoreSaveStatus('failed');
@@ -1295,7 +1341,7 @@ const Sing = () => {
                       <Share2 className="w-5 h-5 mr-2" />
                       Share
                     </Button>
-                    <Button size="lg" className="gradient-primary text-primary-foreground" onClick={() => navigate('/')}>
+                    <Button size="lg" className="gradient-primary text-primary-foreground" onClick={handleNextClick}>
                       <Home className="w-5 h-5 mr-2" />
                       Next
                     </Button>

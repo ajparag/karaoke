@@ -26,12 +26,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Music, Trophy, Loader2, Play, Search, LogOut, User, Sun, Moon } from "lucide-react";
+import { Music, Trophy, Loader2, Play, Search, LogOut, User, Sun, Moon, PartyPopper, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalSeparation, prefetchAudio, warmUpHFSpace } from "@/hooks/useVocalSeparation";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { useAuth } from "@/hooks/useAuth";
+import { useTheme } from "@/hooks/useTheme";
 import { useBackGuard } from "@/hooks/useBackGuard";
 import {
   AlertDialog,
@@ -81,29 +82,9 @@ const Index = () => {
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
   const [trendingSongs, setTrendingSongs] = useState<string[]>([]);
 
-  // Theme toggle -- persisted in localStorage, defaults to light.
-  // Sing page forces dark independently; this only affects browse pages.
-  const [isDark, setIsDark] = useState(() => {
-    return localStorage.getItem('theme') === 'dark';
-  });
-
-  useEffect(() => {
-    if (isDark) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    localStorage.setItem('theme', isDark ? 'dark' : 'light');
-  }, [isDark]);
-
-  // Clean up: remove dark class when navigating away (Sing page manages its own)
-  useEffect(() => {
-    return () => {
-      if (!isDark) {
-        document.documentElement.classList.remove('dark');
-      }
-    };
-  }, [isDark]);
+  // Theme now comes from the shared ThemeProvider (applied globally in
+  // App.tsx) so it's consistent across every page, not just this one.
+  const { isDark, toggleTheme } = useTheme();
 
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
@@ -213,6 +194,12 @@ const Index = () => {
   const handleSelectTrack = (track: Track) => {
     setSelectedTrack(track);
     sessionStorage.setItem('selectedTrack', JSON.stringify(track));
+    // Solo search-and-sing entry point -- clear any leftover party context
+    // from a previous session (e.g. user abandoned a party song mid-way
+    // via back button instead of tapping "Next"). Without this, a later
+    // unrelated solo score could get wrongly written back to a stale
+    // party queue row.
+    sessionStorage.removeItem('activePartyContext');
 
     // Prefetch lyrics in parallel with separation
     sessionStorage.removeItem('prefetchedLyrics');
@@ -276,7 +263,7 @@ const Index = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => setIsDark(d => !d)}
+            onClick={toggleTheme}
             className="rounded-full h-9 w-9"
             aria-label="Toggle theme"
           >
@@ -318,6 +305,27 @@ const Index = () => {
         <br className="hidden sm:block" />
         Get scored on pitch, rhythm and technique. Challenge your friends.
       </p>
+
+      {/* Mode picker: solo vs party */}
+      <div className="px-4 mb-4">
+        <div className="max-w-xl mx-auto grid grid-cols-3 gap-2">
+          <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border">
+            <Search className="w-4 h-4 text-primary" />
+            <span className="text-xs font-medium">Sing Solo</span>
+            <span className="text-[10px] text-muted-foreground">search below</span>
+          </div>
+          <Link to="/party/host" className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border hover:border-primary/50 transition-colors">
+            <PartyPopper className="w-4 h-4 text-primary" />
+            <span className="text-xs font-medium">Host Party</span>
+            <span className="text-[10px] text-muted-foreground">start a stage</span>
+          </Link>
+          <Link to="/party/join" className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border hover:border-primary/50 transition-colors">
+            <Users className="w-4 h-4 text-primary" />
+            <span className="text-xs font-medium">Join Party</span>
+            <span className="text-[10px] text-muted-foreground">enter a code</span>
+          </Link>
+        </div>
+      </div>
 
       {/* Search bar */}
       <div className="px-4 mb-3">
