@@ -24,6 +24,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalsComparison } from "@/hooks/useVocalsComparison";
 import { useAuth } from "@/hooks/useAuth";
+import { useTheme } from "@/hooks/useTheme";
 import { Slider } from "@/components/ui/slider";
 import { useVocalSeparation } from "@/hooks/useVocalSeparation";
 import { AudioDebugOverlay } from "@/components/karaoke/AudioDebugOverlay";
@@ -66,6 +67,7 @@ const Sing = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { user, session } = useAuth();
+  const { isDark } = useTheme();
   
   const [track, setTrack] = useState<Track | null>(null);
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
@@ -1147,7 +1149,7 @@ const Sing = () => {
 
 
   return (
-    <div className="dark h-[100dvh] bg-background flex flex-col overflow-hidden">
+    <div className={`${isDark ? "dark" : ""} h-[100dvh] bg-background flex flex-col overflow-hidden`}>
       {showAudioDebug ? (
         <AudioDebugOverlay
           debug={{
