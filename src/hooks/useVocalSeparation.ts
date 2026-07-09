@@ -120,8 +120,14 @@ if (typeof window !== 'undefined') {
 // WARMUP
 // =============================================================================
 
-const MODAL_URL = 'https://ajparag--vocal-separator-v3-vocalseparator-ui.modal.run';
+// Two-tier GPU deployment: FAST (A10G) for anything a live user is
+// waiting on, BACKGROUND (T4, cheaper/slower) for silent pre-separation
+// of queued party songs with minutes of buffer before they're needed.
+const MODAL_URL_FAST = 'https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run';
+const MODAL_URL_BACKGROUND = 'https://ajparag--vocal-separator-v3-vocalseparatorbackground-ui.modal.run';
 const MODAL_API_KEY = 'pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32';
+
+export type SeparationTier = 'fast' | 'background';
 const WARMUP_STALE_MS = 1 * 60 * 1000; // re-ping if >1 min since last warmup
 
 let lastWarmupTs = 0;
@@ -183,7 +189,7 @@ export function useVocalSeparation() {
   const [separatedAudio, setSeparatedAudio] = useState<SeparationResult | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const separateVocals = useCallback(async (audioUrl: string): Promise<SeparationResult | null> => {
+  const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast'): Promise<SeparationResult | null> => {
     setIsProcessing(true);
     setProgress('Checking cache...');
     setError(null);
@@ -245,7 +251,10 @@ export function useVocalSeparation() {
       setProgress('AI is separating vocals...');
       sepLog('SEP', `${elapsed()} Calling /separate-by-url...`);
 
-      const resp = await fetch(`${MODAL_URL}/separate-by-url`, {
+      const modalUrl = tier === 'background' ? MODAL_URL_BACKGROUND : MODAL_URL_FAST;
+      sepLog('SEP', `Using ${tier.toUpperCase()} tier (${tier === 'background' ? 'T4' : 'A10G'})`);
+
+      const resp = await fetch(`${modalUrl}/separate-by-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': MODAL_API_KEY },
         body: JSON.stringify({ audio_url: audioUrl }),
@@ -257,8 +266,8 @@ export function useVocalSeparation() {
       }
 
       const json = await resp.json();
-      const instUrl = json?.instrumental_url ? `${MODAL_URL}${json.instrumental_url}` : null;
-      const vocUrl = json?.vocal_url ? `${MODAL_URL}${json.vocal_url}` : null;
+      const instUrl = json?.instrumental_url ? `${modalUrl}${json.instrumental_url}` : null;
+      const vocUrl = json?.vocal_url ? `${modalUrl}${json.vocal_url}` : null;
 
       if (!instUrl) throw new Error('No instrumental URL returned');
 
