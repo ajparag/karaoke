@@ -37,7 +37,8 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Mic, Loader2 } from 'lucide-react';
+import { Mic, Loader2, Sun, Moon } from 'lucide-react';
+import { useTheme } from '@/hooks/useTheme';
 import { z } from 'zod';
 import { supabase } from '@/integrations/supabase/client';
 
@@ -54,6 +55,7 @@ const signUpSchema = z.object({
 
 export default function Auth() {
   const navigate = useNavigate();
+  const { isDark, toggleTheme } = useTheme();
   const { user, signIn, signUp, loading: authLoading } = useAuth();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
@@ -162,7 +164,16 @@ export default function Auth() {
 
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+    <div className="min-h-screen flex items-center justify-center bg-background p-4 relative">
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={toggleTheme}
+        className="absolute top-4 right-4 rounded-full"
+        aria-label="Toggle theme"
+      >
+        {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+      </Button>
       <div className="w-full max-w-md space-y-6 animate-fade-in">
         <div className="flex flex-col items-center gap-4">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl gradient-primary shadow-glow">

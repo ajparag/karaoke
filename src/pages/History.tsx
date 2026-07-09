@@ -3,8 +3,9 @@ import { useNavigate, Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
-import { Music, Calendar, Clock, Trash2, TrendingUp, ArrowLeft, Mic } from 'lucide-react';
+import { Music, Calendar, Clock, Trash2, TrendingUp, ArrowLeft, Mic, Sun, Moon } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { useTheme } from '@/hooks/useTheme';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -35,6 +36,7 @@ export default function History() {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
+  const { isDark, toggleTheme } = useTheme();
   const [scores, setScores] = useState<ScoreEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
@@ -128,10 +130,13 @@ export default function History() {
               <ArrowLeft className="w-5 h-5" />
             </Button>
           </Link>
-          <div>
+          <div className="flex-1">
             <h1 className="font-semibold text-xl">Your History</h1>
             <p className="text-sm text-muted-foreground">Track your singing journey</p>
           </div>
+          <Button variant="ghost" size="icon" onClick={toggleTheme} className="rounded-full" aria-label="Toggle theme">
+            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </Button>
         </div>
       </header>
 

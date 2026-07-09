@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
-import { Trophy, Medal, Award, Music, ArrowLeft, MapPin } from 'lucide-react';
+import { useTheme } from '@/hooks/useTheme';
+import { Trophy, Medal, Award, Music, ArrowLeft, MapPin, Sun, Moon } from 'lucide-react';
 
 interface LeaderboardEntry {
   id: string;
@@ -24,6 +25,7 @@ interface TopScore {
 }
 
 export default function Leaderboard() {
+  const { isDark, toggleTheme } = useTheme();
   const [topUsers, setTopUsers] = useState<LeaderboardEntry[]>([]);
   const [topScores, setTopScores] = useState<TopScore[]>([]);
   const [loading, setLoading] = useState(true);
@@ -90,10 +92,13 @@ export default function Leaderboard() {
               <ArrowLeft className="w-5 h-5" />
             </Button>
           </Link>
-          <div>
+          <div className="flex-1">
             <h1 className="font-semibold text-xl">Leaderboard</h1>
             <p className="text-sm text-muted-foreground">Top performers worldwide</p>
           </div>
+          <Button variant="ghost" size="icon" onClick={toggleTheme} className="rounded-full" aria-label="Toggle theme">
+            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </Button>
         </div>
       </header>
 
