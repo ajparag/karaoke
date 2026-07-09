@@ -17,6 +17,7 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -24,7 +25,19 @@ import { useToast } from "@/hooks/use-toast";
 import { useVocalSeparation } from "@/hooks/useVocalSeparation";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { saveCachedTracks, getCachedTracks } from "@/lib/audioCache";
-import { ArrowLeft, Copy, Check, Play, X, Music, Loader2, PartyPopper, Share2, HelpCircle } from "lucide-react";
+import { getDeviceId } from "@/hooks/usePartyDevice";
+import { ArrowLeft, Copy, Check, Play, X, Music, Loader2, PartyPopper, Share2, HelpCircle, Search, Plus } from "lucide-react";
+
+interface SearchTrack {
+  id: string;
+  title: string;
+  artist: string;
+  thumbnail: string;
+  duration: string;
+  audioUrl: string;
+  album?: string;
+  language?: string;
+}
 
 interface QueueItem {
   id: string;
@@ -61,6 +74,15 @@ export default function PartyStage() {
   const [showHelp, setShowHelp] = useState(false);
 
   const preSeparateTriggeredRef = useRef<Set<string>>(new Set());
+  const deviceId = getDeviceId();
+
+  // Host can search and add songs to their own queue too -- previously
+  // this screen only supported playing/removing, with no way to add a
+  // song at all (a real gap, especially before any friends have joined).
+  const [addQuery, setAddQuery] = useState("");
+  const [addResults, setAddResults] = useState<SearchTrack[]>([]);
+  const [isAddSearching, setIsAddSearching] = useState(false);
+  const [addedTrackId, setAddedTrackId] = useState<string | null>(null);
 
   // Load stage + verify host identity
   useEffect(() => {
@@ -133,7 +155,9 @@ export default function PartyStage() {
         const alreadyCached = await getCachedTracks(nextQueued.audio_url);
         if (alreadyCached) return; // already warm, nothing to do
 
-        const result = await separateVocals(nextQueued.audio_url);
+        // Background tier (T4) -- nobody is actively waiting on this,
+        // it just needs to be ready by the time the host taps Play.
+        const result = await separateVocals(nextQueued.audio_url, 'background');
         if (!result || result.fromCache) return;
 
         const instResp = await fetch(result.instrumentalUrl);
@@ -175,6 +199,46 @@ export default function PartyStage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
       toast({ title: "Link copied", description: "Paste it to share with friends" });
+    }
+  };
+
+  const handleAddSearch = useCallback(async () => {
+    if (!addQuery.trim()) return;
+    setIsAddSearching(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("search-music", { body: { query: addQuery.trim(), limit: 15 } });
+      if (error) throw error;
+      setAddResults(data?.tracks || []);
+    } catch {
+      toast({ title: "Search failed", description: "Please try again", variant: "destructive" });
+    } finally {
+      setIsAddSearching(false);
+    }
+  }, [addQuery, toast]);
+
+  const handleAddSong = async (track: SearchTrack) => {
+    if (!stageId || !user) return;
+    setAddedTrackId(track.id);
+    const singerName = user.user_metadata?.username || user.user_metadata?.full_name || "Host";
+    const { error } = await supabase.from("stage_queue").insert({
+      stage_id: stageId,
+      track_id: track.id,
+      song_title: track.title,
+      song_artist: track.artist,
+      thumbnail_url: track.thumbnail,
+      audio_url: track.audioUrl,
+      duration_seconds: track.duration ? parseInt(track.duration, 10) || null : null,
+      language: track.language || null,
+      album: track.album || null,
+      singer_name: singerName,
+      device_id: deviceId,
+      status: "queued",
+    });
+    if (error) {
+      toast({ title: "Could not add song", variant: "destructive" });
+      setAddedTrackId(null);
+    } else {
+      setTimeout(() => setAddedTrackId(null), 1500);
     }
   };
 
@@ -290,6 +354,40 @@ export default function PartyStage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Add a song -- host can queue up their own picks too */}
+        <div>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Search a song to add..."
+              value={addQuery}
+              onChange={(e) => setAddQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddSearch()}
+              className="rounded-full"
+            />
+            <Button onClick={handleAddSearch} disabled={isAddSearching || !addQuery.trim()} size="icon" className="gradient-primary text-primary-foreground rounded-full shrink-0">
+              {isAddSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+            </Button>
+          </div>
+          {addResults.length > 0 && (
+            <div className="space-y-1 mt-2">
+              {addResults.map((track) => (
+                <div key={track.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50">
+                  <div className="w-10 h-10 rounded-lg bg-muted shrink-0 overflow-hidden">
+                    {track.thumbnail ? <img src={track.thumbnail} alt="" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-3 text-muted-foreground" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{track.title}</p>
+                    <p className="text-xs text-muted-foreground truncate">{track.artist}</p>
+                  </div>
+                  <Button size="sm" variant="outline" className="shrink-0 h-8" onClick={() => handleAddSong(track)} disabled={addedTrackId === track.id}>
+                    {addedTrackId === track.id ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Now playing / next up */}
         {singingSong ? (

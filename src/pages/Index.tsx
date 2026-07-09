@@ -80,6 +80,7 @@ const Index = () => {
   const separationStartedRef = useRef(false);
 
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [trendingSongs, setTrendingSongs] = useState<string[]>([]);
 
   // Theme now comes from the shared ThemeProvider (applied globally in
@@ -191,6 +192,14 @@ const Index = () => {
   };
 
   // Track selection: start separation + lyrics prefetch, then navigate
+  const handleSingSoloClick = () => {
+    // Clear any leftover party context from a previous party session so
+    // the next song sung is treated as a genuine solo performance.
+    sessionStorage.removeItem('activePartyContext');
+    searchInputRef.current?.focus();
+    searchInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
   const handleSelectTrack = (track: Track) => {
     setSelectedTrack(track);
     sessionStorage.setItem('selectedTrack', JSON.stringify(track));
@@ -309,11 +318,14 @@ const Index = () => {
       {/* Mode picker: solo vs party */}
       <div className="px-4 mb-4">
         <div className="max-w-xl mx-auto grid grid-cols-3 gap-2">
-          <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border">
+          <button
+            onClick={handleSingSoloClick}
+            className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border hover:border-primary/50 transition-colors"
+          >
             <Search className="w-4 h-4 text-primary" />
             <span className="text-xs font-medium">Sing Solo</span>
             <span className="text-[10px] text-muted-foreground">search below</span>
-          </div>
+          </button>
           <Link to="/party/host" className="flex flex-col items-center gap-1 p-3 rounded-xl bg-muted/50 border border-border hover:border-primary/50 transition-colors">
             <PartyPopper className="w-4 h-4 text-primary" />
             <span className="text-xs font-medium">Host Party</span>
@@ -331,6 +343,7 @@ const Index = () => {
       <div className="px-4 mb-3">
         <div className="max-w-xl mx-auto flex gap-2">
           <Input
+            ref={searchInputRef}
             type="text"
             placeholder="Search any song..."
             value={query}

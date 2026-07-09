@@ -183,13 +183,17 @@ export default function PartyQueue() {
     <div className="min-h-screen bg-background">
       <header className="glass border-b border-border p-4 sticky top-0 z-50">
         <div className="max-w-xl mx-auto flex items-center gap-3">
-          <Link to="/"><Button variant="ghost" size="icon"><ArrowLeft className="w-5 h-5" /></Button></Link>
-          <div>
+          <div className="flex-1 min-w-0">
             <h1 className="font-semibold text-lg flex items-center gap-2">
-              <PartyPopper className="w-4 h-4 text-primary" /> {stageName}
+              <PartyPopper className="w-4 h-4 text-primary shrink-0" /> <span className="truncate">{stageName}</span>
             </h1>
             <p className="text-xs text-muted-foreground">Singing as {myName}</p>
           </div>
+          <Link to="/">
+            <Button variant="outline" size="sm" className="shrink-0 gap-1">
+              <ArrowLeft className="w-4 h-4" /> Leave Party
+            </Button>
+          </Link>
         </div>
       </header>
 
