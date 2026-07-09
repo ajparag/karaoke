@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import { ThemeProvider } from "@/hooks/useTheme";
+import { AuthCallbackGate } from "@/components/AuthCallbackGate";
 import { useEffect } from "react";
 import { warmUpHFSpace } from "@/hooks/useVocalSeparation";
 import Index from "./pages/Index";
@@ -13,6 +14,7 @@ import Auth from "./pages/Auth";
 import Sing from "./pages/Sing";
 import Leaderboard from "./pages/Leaderboard";
 import History from "./pages/History";
+import Profile from "./pages/Profile";
 import CreateParty from "./pages/CreateParty";
 import JoinParty from "./pages/JoinParty";
 import PartyStage from "./pages/PartyStage";
@@ -61,6 +63,7 @@ const App = () => {
           <TooltipProvider>
             <Toaster />
             <Sonner />
+            <AuthCallbackGate>
             <HashRouter>
               <Routes>
                 <Route path="/" element={<Index />} />
@@ -68,6 +71,7 @@ const App = () => {
                 <Route path="/sing/:trackId" element={<Sing />} />
                 <Route path="/leaderboard" element={<Leaderboard />} />
                 <Route path="/history" element={<History />} />
+                <Route path="/profile" element={<Profile />} />
                 <Route path="/party/host" element={<CreateParty />} />
                 <Route path="/party/join" element={<JoinParty />} />
                 <Route path="/party/:code/stage" element={<PartyStage />} />
@@ -75,6 +79,7 @@ const App = () => {
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </HashRouter>
+            </AuthCallbackGate>
           </TooltipProvider>
         </AuthProvider>
         </ThemeProvider>
