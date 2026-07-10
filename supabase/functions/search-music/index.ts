@@ -213,31 +213,64 @@ function timedFetch(url: string, ms = 5000): Promise<Response> {
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
 
-async function searchSaavn(query: string): Promise<Track[]> {
+// Fetch a single page of Saavn results, with the existing 429 retry logic.
+// Returns [] on any failure -- callers treat missing pages as "no more
+// results" rather than a hard error, so one bad page does not sink the
+// others fetched in parallel.
+async function fetchSaavnPage(query: string, page: number): Promise<any[]> {
   try {
-    const url = `${SAAVN_API_BASE}/search/songs?query=${encodeURIComponent(query)}&page=1&limit=20`;
-    console.log('Saavn query:', query);
+    const url = `${SAAVN_API_BASE}/search/songs?query=${encodeURIComponent(query)}&page=${page}&limit=40`;
 
-    // 5s hard timeout — prevents a hanging Saavn mirror from stalling search
     let response = await timedFetch(url);
-
     if (response.status === 429) {
       await new Promise(r => setTimeout(r, 1200));
       response = await timedFetch(url);
     }
-
     if (!response.ok) {
-      console.error('Saavn error:', response.status);
+      console.error(`Saavn error (page ${page}):`, response.status);
       return [];
     }
 
     const data = await response.json();
     if (!data.success || !data.data?.results) {
-      console.error('Saavn: unexpected response shape', JSON.stringify(data).slice(0, 200));
+      console.error(`Saavn: unexpected response shape (page ${page})`, JSON.stringify(data).slice(0, 200));
       return [];
     }
+    return data.data.results;
+  } catch (err) {
+    console.error(`Saavn page ${page} fetch error:`, err);
+    return [];
+  }
+}
 
-    return data.data.results.map((song: any) => {
+async function searchSaavn(query: string): Promise<Track[]> {
+  try {
+    // Saavn's API caps at ~40 results PER PAGE regardless of the limit
+    // param -- that part is a real ceiling on their side, confirmed via
+    // testing. But it DOES support pagination, so to remove the effective
+    // 40-result restriction we fetch multiple pages in parallel and merge
+    // them, instead of just asking for a bigger single page (which gets
+    // silently clamped back to ~40 anyway).
+    console.log('Saavn query:', query);
+    const PAGES_TO_FETCH = 4; // pages 1-4 in parallel -- up to ~160 results
+    const pageResults = await Promise.all(
+      Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
+    );
+
+    // Merge and dedupe by song id (Saavn's pagination can occasionally
+    // overlap by a track or two at page boundaries).
+    const seenIds = new Set<string>();
+    const merged: any[] = [];
+    for (const page of pageResults) {
+      for (const song of page) {
+        if (song?.id && !seenIds.has(song.id)) {
+          seenIds.add(song.id);
+          merged.push(song);
+        }
+      }
+    }
+
+    return merged.map((song: any) => {
       // downloadUrl[] entries use `.url` (confirmed — no `.link` field exists)
       const downloadUrls = song.downloadUrl || [];
       // Prefer standard stereo AAC. Skip SAR-encoded URLs (_sar_ in path) —
@@ -340,7 +373,11 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
     console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(10)} plays | ${t.title} — ${t.artist}`);
   });
 
-  const finalTracks = scored.map(({ t }) => t).slice(0, 20);
+  // No count cap here anymore -- the frontend shows results in a
+  // scrollable container instead of relying on the backend to truncate.
+  // Every genuinely relevant result Saavn returned is available to scroll
+  // through, not just the first 20.
+  const finalTracks = scored.map(({ t }) => t);
   searchCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
   return finalTracks;
 }
