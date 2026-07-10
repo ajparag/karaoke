@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, PartyPopper, Loader2, User, Lock, Save } from "lucide-react";
+import { ArrowLeft, PartyPopper, Loader2, User, Lock, Save, X } from "lucide-react";
 
 interface ActiveStage {
   code: string;
@@ -37,6 +37,7 @@ export default function Profile() {
 
   const [activeStages, setActiveStages] = useState<ActiveStage[]>([]);
   const [loadingStages, setLoadingStages] = useState(true);
+  const [endingCode, setEndingCode] = useState<string | null>(null);
 
   useEffect(() => {
     if (authLoading) return;
@@ -61,6 +62,24 @@ export default function Profile() {
     };
     loadStages();
   }, [user]);
+
+  const handleEndParty = async (code: string) => {
+    if (!user) return;
+    setEndingCode(code);
+    const { error } = await supabase
+      .from("stages")
+      .update({ is_active: false })
+      .eq("code", code)
+      .eq("host_user_id", user.id);
+
+    if (error) {
+      toast({ title: "Could not end party", description: error.message, variant: "destructive" });
+    } else {
+      setActiveStages((prev) => prev.filter((s) => s.code !== code));
+      toast({ title: "Party ended" });
+    }
+    setEndingCode(null);
+  };
 
   const handleSaveName = async () => {
     if (!username.trim()) return;
@@ -142,9 +161,21 @@ export default function Profile() {
                     <p className="font-medium truncate">{stage.name}</p>
                     <p className="text-xs text-muted-foreground tracking-widest">{stage.code}</p>
                   </div>
-                  <Link to={`/party/${stage.code}/stage`}>
-                    <Button size="sm" className="gradient-primary text-primary-foreground shrink-0">Resume</Button>
-                  </Link>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => handleEndParty(stage.code)}
+                      disabled={endingCode === stage.code}
+                      title="End this party for everyone"
+                    >
+                      {endingCode === stage.code ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+                    </Button>
+                    <Link to={`/party/${stage.code}/stage`}>
+                      <Button size="sm" className="gradient-primary text-primary-foreground">Resume</Button>
+                    </Link>
+                  </div>
                 </div>
               ))}
             </CardContent>
