@@ -194,29 +194,19 @@ export function useVocalSeparation() {
     setProgress('Checking cache...');
     setError(null);
 
-    // Check IndexedDB first. If this exact song was fully cached on a
-    // previous play, skip Modal entirely -- instant playback, no GPU cost.
-    // Streaming mode is untouched when this misses (the overwhelming
-    // majority of plays), which is the default path below.
-    try {
-      const cached = await getCachedTracks(audioUrl);
-      if (cached) {
-        sepLog('CACHE', 'IndexedDB HIT -- skipping Modal, instant playback');
-        const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
-        const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
-        const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
-        setSeparatedAudio(result);
-        setProgress('');
-        setIsProcessing(false);
-        return result;
-      }
-    } catch (e) {
-      console.warn('[VocalSeparation] Cache check failed (non-fatal, falling through to Modal):', e);
-    }
-
-    setProgress('Starting AI separation...');
-
-    // Deduplicate: if separation already in-flight for this URL, attach to it
+    // Deduplicate FIRST, before any await (including the cache check).
+    // This must happen synchronously relative to any other caller for the
+    // SAME audioUrl -- e.g. Party Mode's background (T4) pre-separation of
+    // the next queued song, and Sing.tsx's normal fast (A10G) call for
+    // that same song once the host taps Play. If the dedup check ran
+    // AFTER an awaited cache lookup (as it used to), both callers could
+    // pass the empty check before either claimed the slot -- because the
+    // await yields control back to the browser, letting a second call's
+    // own cache-check run in the gap. Claiming the slot with zero awaits
+    // in between closes that race: whichever call reaches this line first
+    // wins and does the real work (cache check, then Modal if needed);
+    // every other caller for the same URL just attaches to that one
+    // shared result, regardless of which tier or page triggered it.
     const existing = separationPromiseCache.get(audioUrl);
     if (existing) {
       setProgress('AI vocal separation in progress...');
@@ -235,6 +225,26 @@ export function useVocalSeparation() {
     abortControllerRef.current = new AbortController();
 
     try {
+      // Cache check now happens INSIDE the claimed slot -- no one else can
+      // race past this, since they'd already have attached to `shared` above.
+      try {
+        const cached = await getCachedTracks(audioUrl);
+        if (cached) {
+          sepLog('CACHE', 'IndexedDB HIT -- skipping Modal, instant playback');
+          const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
+          const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
+          const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
+          setSeparatedAudio(result);
+          setProgress('');
+          setIsProcessing(false);
+          resolveShared(result);
+          return result;
+        }
+      } catch (e) {
+        console.warn('[VocalSeparation] Cache check failed (non-fatal, falling through to Modal):', e);
+      }
+
+      setProgress('Starting AI separation...');
       clearOldCache(7).catch(() => {});
 
       const t0 = Date.now();
