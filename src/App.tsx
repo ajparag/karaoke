@@ -8,7 +8,6 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { ThemeProvider } from "@/hooks/useTheme";
 import { AuthCallbackGate } from "@/components/AuthCallbackGate";
 import { useEffect } from "react";
-import { warmUpHFSpace } from "@/hooks/useVocalSeparation";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import Sing from "./pages/Sing";
@@ -51,10 +50,13 @@ class ErrorBoundary extends Component<
 }
 
 const App = () => {
-  useEffect(() => {
-    warmUpHFSpace().catch(() => {});
-  }, []);
-
+  // NOTE: warmUpHFSpace() is intentionally NOT called here. This effect
+  // used to ping Modal on every single page load/visit -- homepage,
+  // leaderboard, auth, everywhere -- burning GPU idle time for visitors
+  // who never search or sing at all. Warmup now happens ONLY from
+  // Index.tsx's handleSearch(), i.e. the moment someone actually clicks
+  // search or presses Enter -- the earliest point we know they intend to
+  // pick a song.
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
