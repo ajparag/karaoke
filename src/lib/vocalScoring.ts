@@ -2,8 +2,8 @@
 // These are deterministic and unit-testable (no Web Audio dependencies).
 
 export const SILENCE_RMS = 0.015;
-export const PITCH_TOLERANCE_CENTS = 150; // 1.5 semitones -- party-friendly for casual singers
-export const ONSET_WINDOW_MS = 400; // generous for casual singers
+export const PITCH_TOLERANCE_CENTS = 100; // 1 semitone -- tightened from 1.5 semitones
+export const ONSET_WINDOW_MS = 300; // tightened from 400ms -- offbeat singing should cost more
 
 /** RMS from Float32 time-domain samples. */
 export function rmsFloat(data: Float32Array): number {
@@ -181,7 +181,10 @@ export function scoreRhythm(
       if (d < best) { best = d; bestI = i; }
     }
     if (best <= tolerance && bestI >= 0) {
-      matched += 1 - (best / tolerance) * 0.5;
+      // Full linear falloff to 0 credit at the tolerance boundary (was
+      // floored at 50% credit even for a note landing right at the edge --
+      // offbeat singing needs to actually cost something).
+      matched += 1 - (best / tolerance);
       used.add(bestI);
     }
   }
