@@ -169,7 +169,7 @@ const Index = () => {
     setHasSearched(true);
     try {
       const { data, error } = await supabase.functions.invoke("search-music", {
-        body: { query: searchQuery.trim(), limit: 20 },
+        body: { query: searchQuery.trim() }, // limit removed -- edge function never read it; real cap lives in search-music (now paginated)
       });
       if (error) throw error;
       setTracks(data?.tracks || []);
@@ -240,7 +240,12 @@ const Index = () => {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-background flex flex-col">
+    <div className="h-[100dvh] bg-background flex flex-col overflow-hidden">
+      {/* Root is locked to exactly the viewport height (not min-h, which
+          would let the whole page grow and scroll). This makes the results
+          list below the ONLY scrollable region -- device-aware by
+          construction, since flex-1 always resolves to "whatever space is
+          actually left" on that specific screen, not a hardcoded guess. */}
       {/* Leave confirmation dialog (back pressed during separation) */}
       <AlertDialog open={showLeaveConfirm} onOpenChange={setShowLeaveConfirm}>
         <AlertDialogContent>
