@@ -134,7 +134,7 @@ const Sing = () => {
   const scoreAccumulatorRef = useRef({ pitch: 0, rhythm: 0, technique: 0, count: 0 });
 
   // New scoring weights: Pitch 40%, Rhythm 30%, Technique 30% (no diction)
-  const SCORE_WEIGHTS = useRef({ pitch: 0.4, rhythm: 0.3, technique: 0.3 }).current;
+  const SCORE_WEIGHTS = useRef({ pitch: 1/3, rhythm: 1/3, technique: 1/3 }).current;
 
   // -- Android hardware volume fix -----------------------------------------
   // On Android, hardware volume buttons control call/ringtone volume until
@@ -657,7 +657,10 @@ const Sing = () => {
 
       // Scale 0-100 -> 0-1000 for the displayed score. Now derived from the
       // same running averages as the breakdown, so the two always agree.
-      setTotalScore(Math.round(combined * 10));
+      // Negative marking (missed notes during vocals) can drag the internal
+      // average below 0 -- that's the intended penalty. Floor only the
+      // final displayed/leaderboard number at 0 so it never shows negative.
+      setTotalScore(Math.max(0, Math.round(combined * 10)));
     };
 
     // Poll metricsRef at 5 Hz as a fallback display update
@@ -916,9 +919,13 @@ const Sing = () => {
 
       // Breakdown
       const count = scoreAccumulatorRef.current.count;
-      const avgPitch = count > 0 ? Math.round(scoreAccumulatorRef.current.pitch / count) : 0;
-      const avgRhythm = count > 0 ? Math.round(scoreAccumulatorRef.current.rhythm / count) : 0;
-      const avgTechnique = count > 0 ? Math.round(scoreAccumulatorRef.current.technique / count) : 0;
+      // Floored at 0 for display -- a shared score card showing "-30%"
+      // would look like a rendering bug rather than the intended penalty.
+      // The headline total score above still reflects the true (possibly
+      // heavily negative-marked) internal average.
+      const avgPitch = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.pitch / count)) : 0;
+      const avgRhythm = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.rhythm / count)) : 0;
+      const avgTechnique = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.technique / count)) : 0;
 
       const cols = [
         { label: 'Pitch', value: avgPitch },
@@ -1019,10 +1026,13 @@ const Sing = () => {
     setIsSaving(true);
     setScoreSaveStatus('saving');
     try {
-      const avgPitch = scoreAccumulatorRef.current.count > 0
-        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0;
-      const avgRhythm = scoreAccumulatorRef.current.count > 0
-        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0;
+      // Floored at 0 before submission -- the backend clamps timingAccuracy
+      // to [0,100] anyway, but being explicit here keeps the stored value
+      // meaningful rather than relying on the server's safety clamp.
+      const avgPitch = Math.max(0, scoreAccumulatorRef.current.count > 0
+        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0);
+      const avgRhythm = Math.max(0, scoreAccumulatorRef.current.count > 0
+        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0);
 
       const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' :
         totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
