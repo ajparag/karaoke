@@ -169,6 +169,28 @@ const Sing = () => {
     }
   }, []);
 
+  // MediaSession API: the standard, OS-recognized way to declare active
+  // media playback. Android's hardware volume button routing specifically
+  // checks for an active MediaSession, not just any AudioContext -- the
+  // silent-oscillator trick above is a fallback for older/less-compliant
+  // browsers, but this is the primary, more reliable mechanism on modern
+  // Chrome/Android. Kept in sync with isPlaying and the track's own
+  // metadata for the whole song, not just a one-time mount trick.
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !track) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.title || 'KaraokeParty',
+        artist: track.artist || '',
+        album: 'KaraokeParty',
+        artwork: track.thumbnail ? [{ src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }] : [],
+      });
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch (e) {
+      console.warn('[audio] MediaSession sync failed:', e);
+    }
+  }, [track, isPlaying]);
+
   // AI-based vocal separation - loads from IndexedDB cache (separation happens on Index page)
   const {
     isProcessing: isLoadingFromCache,

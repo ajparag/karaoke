@@ -87,12 +87,12 @@ export default function Leaderboard() {
       {/* Header */}
       <header className="glass border-b border-border p-4 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto flex items-center gap-4">
-          <Link to="/">
+          <Link to="/" className="shrink-0">
             <Button variant="ghost" size="icon">
               <ArrowLeft className="w-5 h-5" />
             </Button>
           </Link>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <h1 className="font-semibold text-xl">Leaderboard</h1>
             <p className="text-sm text-muted-foreground">Top performers worldwide</p>
           </div>
@@ -129,17 +129,17 @@ export default function Leaderboard() {
                       index < 3 ? 'bg-muted/50' : 'hover:bg-muted/30'
                     }`}
                   >
-                    <div className="w-8 flex justify-center">{getRankIcon(index)}</div>
-                    <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                    <div className="w-8 flex justify-center shrink-0">{getRankIcon(index)}</div>
+                    <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 ${
                       index === 0 ? 'gradient-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
                     }`}>
                       {user.username.charAt(0).toUpperCase()}
                     </div>
-                    <div className="flex-1">
-                      <div className="font-medium">{user.username}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{user.username}</div>
                       <div className="text-sm text-muted-foreground">{user.songs_performed} songs</div>
                     </div>
-                    <div className="text-lg font-bold">{user.total_score.toLocaleString()}</div>
+                    <div className="text-lg font-bold shrink-0">{user.total_score.toLocaleString()}</div>
                   </div>
                 ))
               )}
@@ -171,27 +171,27 @@ export default function Leaderboard() {
                       index < 3 ? 'bg-muted/50' : 'hover:bg-muted/30'
                     }`}
                   >
-                    <div className="w-8 flex justify-center">{getRankIcon(index)}</div>
+                    <div className="w-8 flex justify-center shrink-0">{getRankIcon(index)}</div>
                     {score.thumbnail_url ? (
-                      <img src={score.thumbnail_url} alt={score.song_title} className="h-12 w-12 rounded-lg object-cover" />
+                      <img src={score.thumbnail_url} alt={score.song_title} className="h-12 w-12 rounded-lg object-cover shrink-0" />
                     ) : (
-                      <div className="h-12 w-12 rounded-lg bg-muted flex items-center justify-center">
+                      <div className="h-12 w-12 rounded-lg bg-muted flex items-center justify-center shrink-0">
                         <Music className="h-5 w-5 text-muted-foreground" />
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="font-medium truncate">{score.song_title}</div>
-                      <div className="text-sm text-muted-foreground flex items-center gap-2">
-                        <span>{score.display_name || 'Anonymous'}</span>
+                      <div className="text-sm text-muted-foreground flex items-center gap-1 min-w-0">
+                        <span className="truncate">{score.display_name || 'Anonymous'}</span>
                         {score.city && (
-                          <span className="flex items-center gap-0.5 text-xs">
+                          <span className="flex items-center gap-0.5 text-xs shrink-0">
                             <MapPin className="h-3 w-3" />
-                            {score.city}
+                            <span className="truncate max-w-[80px]">{score.city}</span>
                           </span>
                         )}
                       </div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right shrink-0">
                       <span className={`text-xl font-bold ${getRatingColor(score.rating)}`}>{score.rating}</span>
                       <div className="text-sm text-muted-foreground">{score.score}</div>
                     </div>
