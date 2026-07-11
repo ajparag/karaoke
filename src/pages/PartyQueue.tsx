@@ -214,7 +214,7 @@ export default function PartyQueue() {
         </div>
 
         {results.length > 0 && (
-          <div className="space-y-1">
+          <div className="space-y-1 max-h-80 overflow-y-auto rounded-lg border border-border p-1">
             {results.map((track) => (
               <div key={track.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50">
                 <div className="w-10 h-10 rounded-lg bg-muted shrink-0 overflow-hidden">

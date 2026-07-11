@@ -320,6 +320,40 @@ export default function PartyStage() {
       </header>
 
       <main className="max-w-3xl mx-auto p-4 space-y-6">
+        {/* Add a song -- host can queue up their own picks too */}
+        <div>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Search a song to add..."
+              value={addQuery}
+              onChange={(e) => setAddQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddSearch()}
+              className="rounded-full"
+            />
+            <Button onClick={handleAddSearch} disabled={isAddSearching || !addQuery.trim()} size="icon" className="gradient-primary text-primary-foreground rounded-full shrink-0">
+              {isAddSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+            </Button>
+          </div>
+          {addResults.length > 0 && (
+            <div className="space-y-1 mt-2 max-h-80 overflow-y-auto rounded-lg border border-border p-1">
+              {addResults.map((track) => (
+                <div key={track.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50">
+                  <div className="w-10 h-10 rounded-lg bg-muted shrink-0 overflow-hidden">
+                    {track.thumbnail ? <img src={track.thumbnail} alt="" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-3 text-muted-foreground" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{track.title}</p>
+                    <p className="text-xs text-muted-foreground truncate">{track.artist}</p>
+                  </div>
+                  <Button size="sm" variant="outline" className="shrink-0 h-8" onClick={() => handleAddSong(track)} disabled={addedTrackId === track.id}>
+                    {addedTrackId === track.id ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Join code */}
         <Card>
           <CardContent className="p-4">
@@ -354,40 +388,6 @@ export default function PartyStage() {
             )}
           </CardContent>
         </Card>
-
-        {/* Add a song -- host can queue up their own picks too */}
-        <div>
-          <div className="flex gap-2">
-            <Input
-              placeholder="Search a song to add..."
-              value={addQuery}
-              onChange={(e) => setAddQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddSearch()}
-              className="rounded-full"
-            />
-            <Button onClick={handleAddSearch} disabled={isAddSearching || !addQuery.trim()} size="icon" className="gradient-primary text-primary-foreground rounded-full shrink-0">
-              {isAddSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-            </Button>
-          </div>
-          {addResults.length > 0 && (
-            <div className="space-y-1 mt-2">
-              {addResults.map((track) => (
-                <div key={track.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50">
-                  <div className="w-10 h-10 rounded-lg bg-muted shrink-0 overflow-hidden">
-                    {track.thumbnail ? <img src={track.thumbnail} alt="" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-3 text-muted-foreground" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{track.title}</p>
-                    <p className="text-xs text-muted-foreground truncate">{track.artist}</p>
-                  </div>
-                  <Button size="sm" variant="outline" className="shrink-0 h-8" onClick={() => handleAddSong(track)} disabled={addedTrackId === track.id}>
-                    {addedTrackId === track.id ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
 
         {/* Now playing / next up */}
         {singingSong ? (
