@@ -136,54 +136,36 @@ const Sing = () => {
   // New scoring weights: Pitch 40%, Rhythm 30%, Technique 30% (no diction)
   const SCORE_WEIGHTS = useRef({ pitch: 1/3, rhythm: 1/3, technique: 1/3 }).current;
 
-  // -- Android hardware volume fix -----------------------------------------
-  // On Android, hardware volume buttons control call/ringtone volume until
-  // media playback starts. Creating a silent AudioContext on mount tells
-  // Android to route volume buttons to media volume immediately.
-  // Also works on iOS via the webkit prefix.
+  // -- Android hardware volume: audioSession declaration only -------------
+  // REMOVED: the old silent-oscillator-AudioContext trick. That trick
+  // solves a DIFFERENT problem (Android not knowing what stream to route
+  // volume keys to before ANY audio has ever played) -- it does nothing
+  // for this app's actual issue, which is that getUserMedia's required
+  // echoCancellation (needed to stop the mic picking up speaker bleed,
+  // see requestMicrophone() in audioPermissions.ts) tags the mic capture
+  // as a voice/communication session at the OS level. That tagging is
+  // what pulls Android's hardware volume keys toward the call/voice
+  // stream -- a silent oscillator "signaling media is playing" never
+  // touched that mechanism at all, since our real instrumental track
+  // already establishes STREAM_MUSIC playback on its own the moment it
+  // starts, with zero tricks needed (this is standard <audio> behavior
+  // on Android). Keeping the oscillator around was unnecessary
+  // complexity solving a non-problem.
+  //
+  // What's left: the audioSession API declaration below is a real,
+  // independent lever -- it doesn't need any AudioContext/oscillator to
+  // exist, it's a standalone navigator-level hint. 'play-and-record' is
+  // the semantically correct type for an app that plays audio AND
+  // records the mic simultaneously (this app's exact situation).
+  //
+  // Full honesty: this remains the more promising lever we have, not a
+  // guaranteed fix -- AEC must stay on the mic stream (removing it risks
+  // reintroducing the inverted-scores bug from speaker bleed), and no
+  // client-side web API can force Android's stream classification once
+  // an AEC-tagged capture stream is active, on every device/OS version.
   useEffect(() => {
-    try {
-      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!Ctx) return;
-      const silentCtx = new Ctx();
-      // Create a silent oscillator to "start" media playback
-      const osc = silentCtx.createOscillator();
-      const gain = silentCtx.createGain();
-      gain.gain.value = 0; // completely silent
-      osc.connect(gain);
-      gain.connect(silentCtx.destination);
-      osc.start();
-      osc.stop(silentCtx.currentTime + 0.001); // stop after 1ms
-      // Set audio session type for volume routing. IMPORTANT: this app
-      // ALSO records from the mic simultaneously (for live scoring), so
-      // declaring 'playback' here is internally contradictory -- it tells
-      // the browser "no recording is happening" while an active mic
-      // stream (acquired later in startAnalysis) says otherwise. Chromium
-      // tags mic streams using echoCancellation as USAGE_VOICE_COMMUNICATION
-      // internally (AEC is fundamentally a call/communication DSP
-      // feature), which is what actually drives Android's hardware
-      // volume-key routing to the call/voice stream instead of media --
-      // a declared 'playback' type likely gets overridden by that
-      // observed reality. 'play-and-record' is the semantically correct
-      // type for "plays audio AND records mic simultaneously", which is
-      // exactly this app's situation, and gives this declaration a real
-      // chance of being honored instead of contradicted by the mic.
-      // NOTE: this is an experiment, not a guaranteed fix -- AEC is still
-      // required on the mic stream to prevent speaker-bleed causing
-      // inverted scores (see requestMicrophone() in audioPermissions.ts),
-      // and no client-side API can fully override how Android classifies
-      // an AEC-enabled stream on every device/browser combination.
-      if ('audioSession' in navigator && (navigator as any).audioSession) {
-        try { (navigator as any).audioSession.type = 'play-and-record'; } catch {}
-      }
-      console.log('[audio] Silent media context created for volume button routing');
-      // Do NOT close the context -- keeping it alive is what tells Android
-      // to route hardware volume buttons to media volume. Closing it reverts
-      // to call/ringtone volume. The context uses negligible resources once
-      // the oscillator stops (no active audio processing, just a live graph).
-      // It will be garbage-collected naturally when the page unloads.
-    } catch (e) {
-      console.warn('[audio] Silent context failed:', e);
+    if ('audioSession' in navigator && (navigator as any).audioSession) {
+      try { (navigator as any).audioSession.type = 'play-and-record'; } catch {}
     }
   }, []);
 
