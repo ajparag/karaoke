@@ -143,7 +143,10 @@ import {
 // ─── Public types ───────────────────────────────────────────────────────────
 
 export interface VocalsComparisonMetrics {
-  pitchMatch: number;       // 0–100, smoothed
+  pitchMatch: number;       // -100 to 100, smoothed -- CAN go negative (missed
+                             // frames during active vocals are penalized at -50
+                             // each; see the negative-marking logic below). Only
+                             // capped at 100 on the upper end, no floor at 0.
   rhythmMatch: number;      // 0–100, smoothed
   techniqueMatch: number;   // 0–100, smoothed
   volume: number;           // current user mic volume (raw)

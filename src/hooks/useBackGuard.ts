@@ -26,22 +26,31 @@ export function useBackGuard(onBackAttempt: (confirmLeave: () => void) => void) 
   const callbackRef = useRef(onBackAttempt);
   callbackRef.current = onBackAttempt; // always read the latest closure, no re-registration needed
 
-  const pushCountRef = useRef(0);
-
   useEffect(() => {
     window.history.pushState(null, "", window.location.href);
-    pushCountRef.current = 1;
 
     const confirmLeave = () => {
       window.removeEventListener("popstate", handler);
-      // Unwind every dummy entry we've pushed, plus one more to land back
-      // at the page the user was on before this guarded page.
-      window.history.go(-(pushCountRef.current + 1));
+      // Real history depth from the previous page is ALWAYS exactly 2
+      // (the original navigation entry to this page, plus the one dummy
+      // sitting on top of it) -- no matter how many times the user has
+      // pressed back. Each back-press's re-push below REPLACES the top
+      // of the stack rather than growing it (pushState always truncates
+      // anything after the current position and inserts fresh) -- so the
+      // distance back to the previous page never actually changes.
+      //
+      // BUG FIXED: this used to be a counter that incremented on every
+      // popstate, on the wrong assumption that each re-push added a new
+      // layer to unwind. It didn't -- the stack depth stays constant,
+      // but the counter kept growing, so go(-(count+1)) overshot further
+      // with every back-press before the user finally confirmed leaving,
+      // in the worst case landing out of range, past the previous page
+      // entirely.
+      window.history.go(-2);
     };
 
     const handler = () => {
       window.history.pushState(null, "", window.location.href);
-      pushCountRef.current += 1;
       callbackRef.current(confirmLeave);
     };
 

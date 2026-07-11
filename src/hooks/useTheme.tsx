@@ -8,9 +8,10 @@
 //
 // Applies/removes the 'dark' class on document.documentElement at APP LOAD
 // time (in App.tsx, not a specific page), so it's consistent regardless of
-// which route the user lands on first. Sing.tsx continues to force its own
-// local 'dark' class on its container independently of this -- that's
-// intentional and unaffected by this provider.
+// which route the user lands on first. Sing.tsx now reads isDark from this
+// SAME provider (via useTheme()) rather than forcing its own local dark
+// mode -- it used to hardcode dark unconditionally, but that was changed
+// so the whole app respects one consistent theme choice everywhere.
 // =============================================================================
 
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
