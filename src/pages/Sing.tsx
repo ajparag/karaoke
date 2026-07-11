@@ -154,9 +154,27 @@ const Sing = () => {
       gain.connect(silentCtx.destination);
       osc.start();
       osc.stop(silentCtx.currentTime + 0.001); // stop after 1ms
-      // Set audio session type for volume routing
+      // Set audio session type for volume routing. IMPORTANT: this app
+      // ALSO records from the mic simultaneously (for live scoring), so
+      // declaring 'playback' here is internally contradictory -- it tells
+      // the browser "no recording is happening" while an active mic
+      // stream (acquired later in startAnalysis) says otherwise. Chromium
+      // tags mic streams using echoCancellation as USAGE_VOICE_COMMUNICATION
+      // internally (AEC is fundamentally a call/communication DSP
+      // feature), which is what actually drives Android's hardware
+      // volume-key routing to the call/voice stream instead of media --
+      // a declared 'playback' type likely gets overridden by that
+      // observed reality. 'play-and-record' is the semantically correct
+      // type for "plays audio AND records mic simultaneously", which is
+      // exactly this app's situation, and gives this declaration a real
+      // chance of being honored instead of contradicted by the mic.
+      // NOTE: this is an experiment, not a guaranteed fix -- AEC is still
+      // required on the mic stream to prevent speaker-bleed causing
+      // inverted scores (see requestMicrophone() in audioPermissions.ts),
+      // and no client-side API can fully override how Android classifies
+      // an AEC-enabled stream on every device/browser combination.
       if ('audioSession' in navigator && (navigator as any).audioSession) {
-        try { (navigator as any).audioSession.type = 'playback'; } catch {}
+        try { (navigator as any).audioSession.type = 'play-and-record'; } catch {}
       }
       console.log('[audio] Silent media context created for volume button routing');
       // Do NOT close the context -- keeping it alive is what tells Android
@@ -332,11 +350,15 @@ const Sing = () => {
     const audio = new Audio();
     audioRef.current = audio;
 
-    // Set audio session type to 'playback' for proper volume button behavior on mobile
+    // 'play-and-record', not 'playback' -- this app records the mic at
+    // the same time it plays the instrumental, so 'playback' alone is an
+    // inaccurate declaration that the browser can (and likely does)
+    // override once it sees an active AEC-enabled input stream. See the
+    // longer explanation in the mount-effect silent-context setup above.
     if ('audioSession' in navigator && (navigator as any).audioSession) {
       try {
-        (navigator as any).audioSession.type = 'playback';
-        console.log('[audio] Set audio session type to playback');
+        (navigator as any).audioSession.type = 'play-and-record';
+        console.log('[audio] Set audio session type to play-and-record');
       } catch (e) {
         console.log('[audio] Could not set audio session type:', e);
       }
