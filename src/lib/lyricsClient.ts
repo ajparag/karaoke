@@ -109,14 +109,28 @@ function scriptPenalty(script: Script, language?: string): number {
     case 'devanagari': return 0;
     case 'latin': return 0;
     case 'unknown': return 3;
-    case 'gurmukhi': return 10;
-    case 'dual': return 10;
+    case 'gurmukhi': return 5;
+    case 'dual': return 5;
   }
 }
 
 // --- Shared helpers ---
 
 const LRCLIB_HEADERS = { 'Lrclib-Client': 'KaraokeParty (https://karaokeparty.in)' };
+
+// Normalizes an album name for comparison -- strips common noise like
+// "(Original Motion Picture Soundtrack)", "- Single", punctuation and
+// casing differences, so "Swades" and "Swades (Original Motion Picture
+// Soundtrack)" are recognized as the same album.
+function normalizeAlbum(raw: string | undefined | null): string {
+  if (!raw) return '';
+  return raw
+    .toLowerCase()
+    .replace(/\(.*?(soundtrack|motion picture|original|ost).*?\)/gi, '')
+    .replace(/-\s*single\s*$/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
 
 // --- Title/album cleanup for Saavn conventions ----------------------------
 // Saavn appends "(From "MovieName")" to virtually every Bollywood movie
@@ -195,15 +209,18 @@ function pickBestResult(
   title: string,
   duration: number | undefined,
   language: string | undefined,
+  album?: string,
 ): RankedResult | null {
   const titleLower = title.toLowerCase().trim();
   const titleWords = titleLower.split(/\s+/);
+  const albumNorm = normalizeAlbum(album);
 
   // Classify each item once
   interface Classified {
     item: any;
     isExactTitle: boolean;
     isCoverVariant: boolean;
+    isAlbumDurationMatch: boolean; // partial title, but album + duration confirm it's the right recording
     durScore: number;
     scriptScore: number;
     script: Script;
@@ -227,11 +244,24 @@ function pickBestResult(
       ? Math.abs(item.duration - duration)
       : 0;
 
+    // Album+duration confirmation: song text is hard to pin down exactly
+    // (transliteration drift, "Rahi" suffixes, spacing), but album name
+    // and exact duration are much more reliable signals that this is the
+    // SAME RECORDING even when the title text itself doesn't match
+    // closely. Duration tolerance is deliberately tight (+/-1s) since
+    // this is being used to OVERRIDE a weak title match -- a loose
+    // duration window here would risk matching a different song from the
+    // same soundtrack with a similar runtime.
+    const albumMatches = albumNorm.length > 0 && normalizeAlbum(item.albumName) === albumNorm;
+    const durationMatches = duration != null && item.duration != null
+      && Math.abs(item.duration - duration) <= 1;
+    const isAlbumDurationMatch = !isExactTitle && !isCoverVariant && albumMatches && durationMatches;
+
     const lyricsText = item.syncedLyrics || item.plainLyrics || '';
     const script = detectScript(lyricsText);
     const scriptScore = scriptPenalty(script, language);
 
-    return { item, isExactTitle, isCoverVariant, durScore, scriptScore, script };
+    return { item, isExactTitle, isCoverVariant, isAlbumDurationMatch, durScore, scriptScore, script };
   });
 
   // Split synced vs plain -- synced ALWAYS preferred
@@ -241,12 +271,17 @@ function pickBestResult(
 
   if (candidates.length === 0) return null;
 
-  // Apply tiers: strictest filter first, relax if no results
+  // Apply tiers: strictest filter first, relax if no results.
+  // The new album+duration tier sits ABOVE "exact title, covers OK" --
+  // a confirmed album+duration match on a different-but-similar title is
+  // stronger evidence of being the right recording than an exact title
+  // that might turn out to be a cover/remix version.
   const tiers: ((c: Classified) => boolean)[] = [
     c => c.isExactTitle && !c.isCoverVariant,   // Tier 1: exact + original
-    c => c.isExactTitle,                         // Tier 2: exact + covers OK
-    c => !c.isCoverVariant,                      // Tier 3: partial + original
-    () => true,                                  // Tier 4: anything
+    c => c.isAlbumDurationMatch,                 // Tier 2: partial title, confirmed by album+duration
+    c => c.isExactTitle,                         // Tier 3: exact + covers OK
+    c => !c.isCoverVariant,                      // Tier 4: partial + original (unconfirmed)
+    () => true,                                  // Tier 5: anything
   ];
 
   let survivors: Classified[] = [];
@@ -348,7 +383,7 @@ async function step1StructuredSearch(
     pool.filter((p: any) => p.syncedLyrics).length, 'synced');
 
   if (pool.length === 0) return null;
-  return pickBestResult(pool, title, duration, language);
+  return pickBestResult(pool, title, duration, language, album);
 }
 
 // =============================================================================
@@ -438,7 +473,7 @@ async function step2GetWithArtistPermutations(
 // =============================================================================
 
 async function step3FreeTextSearch(
-  title: string, artist?: string, duration?: number, language?: string,
+  title: string, artist?: string, duration?: number, language?: string, album?: string,
 ): Promise<RankedResult | null> {
   const words = title.split(/\s+/);
   const trimmedWords = words.map(w => w.length > 4 ? w.slice(0, -1) : w);
@@ -491,7 +526,7 @@ async function step3FreeTextSearch(
 
   const pool = synced.length > 0 ? synced : plain;
   if (pool.length === 0) return null;
-  return pickBestResult(pool, title, duration, language);
+  return pickBestResult(pool, title, duration, language, album);
 }
 
 // =============================================================================
@@ -525,7 +560,7 @@ async function searchLRCLIB(
   }
 
   // Step 3: Free-text search (last resort)
-  const step3 = await step3FreeTextSearch(title, artist, duration, language);
+  const step3 = await step3FreeTextSearch(title, artist, duration, language, album);
   if (step3 && step3.lyrics.length > 0) {
     console.log('[Lyrics] Step 3 SUCCESS (' + step3.script + '):', step3.trackName, '-', step3.lyrics.length, 'lines');
     return step3.lyrics;
