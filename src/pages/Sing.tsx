@@ -1146,11 +1146,25 @@ const Sing = () => {
   // before the save fires. The name input disappears once saving starts.
   useEffect(() => {
     if (showResults && !autoSaveTriggeredRef.current) {
-      autoSaveTriggeredRef.current = true;
       if (user) {
+        // Signed-in: claim the guard and save right away -- no window
+        // where a manual click could possibly beat this anyway.
+        autoSaveTriggeredRef.current = true;
         submitScoreToLeaderboard();
       } else {
-        const timer = setTimeout(() => submitScoreToLeaderboard(), 3000);
+        // Anonymous: do NOT claim the guard yet. Claiming it here (before
+        // the delay) was the bug -- it locked out the "Submit Score"
+        // button for the entire 3-second window, since the button's click
+        // handler checks this same ref and always saw it already true.
+        // The guard is now only claimed inside the timer callback, at the
+        // actual moment of saving, and only if a manual click hasn't
+        // already claimed it first.
+        const timer = setTimeout(() => {
+          if (!autoSaveTriggeredRef.current) {
+            autoSaveTriggeredRef.current = true;
+            submitScoreToLeaderboard();
+          }
+        }, 3000);
         return () => clearTimeout(timer);
       }
     }
