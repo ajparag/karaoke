@@ -85,7 +85,7 @@ export default function Leaderboard() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <header className="glass border-b border-border p-4 sticky top-0 z-50">
+      <header className="glass border-b border-border py-4 px-4 md:px-8 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto flex items-center gap-4">
           <Link to="/" className="shrink-0">
             <Button variant="ghost" size="icon">
@@ -102,12 +102,12 @@ export default function Leaderboard() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto p-4 md:p-8">
+      <main className="max-w-6xl mx-auto py-4 px-4 md:py-8 md:px-8">
         <div className="grid gap-6 lg:grid-cols-2">
           {/* Top Users */}
-          <div className="bg-card border border-border rounded-xl p-6">
-            <div className="flex items-center gap-2 mb-6">
-              <Trophy className="h-5 w-5 text-score-perfect" />
+          <div className="bg-card border border-border rounded-xl p-4 md:p-6">
+            <div className="flex items-center gap-2 mb-4 md:mb-6">
+              <Trophy className="h-5 w-5 text-score-perfect shrink-0" />
               <h2 className="font-semibold text-lg">Top Performers</h2>
             </div>
             
@@ -125,7 +125,7 @@ export default function Leaderboard() {
                 topUsers.map((user, index) => (
                   <div
                     key={user.id}
-                    className={`flex items-center gap-4 p-3 rounded-xl transition-colors ${
+                    className={`flex items-center gap-3 md:gap-4 p-2 md:p-3 rounded-xl transition-colors ${
                       index < 3 ? 'bg-muted/50' : 'hover:bg-muted/30'
                     }`}
                   >
@@ -147,9 +147,9 @@ export default function Leaderboard() {
           </div>
 
           {/* Top Scores */}
-          <div className="bg-card border border-border rounded-xl p-6">
-            <div className="flex items-center gap-2 mb-6">
-              <Music className="h-5 w-5 text-primary" />
+          <div className="bg-card border border-border rounded-xl p-4 md:p-6">
+            <div className="flex items-center gap-2 mb-4 md:mb-6">
+              <Music className="h-5 w-5 text-primary shrink-0" />
               <h2 className="font-semibold text-lg">Top Scores</h2>
             </div>
             
@@ -167,7 +167,7 @@ export default function Leaderboard() {
                 topScores.map((score, index) => (
                   <div
                     key={score.id}
-                    className={`flex items-center gap-4 p-3 rounded-xl transition-colors ${
+                    className={`flex items-center gap-3 md:gap-4 p-2 md:p-3 rounded-xl transition-colors ${
                       index < 3 ? 'bg-muted/50' : 'hover:bg-muted/30'
                     }`}
                   >
