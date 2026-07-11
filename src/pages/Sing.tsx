@@ -1194,6 +1194,35 @@ const Sing = () => {
   useBackGuard(handleBackAttempt);
   useBeforeUnloadGuard(isMidPerformance);
 
+  // Exiting mid-song (via "Leave" on the exit-confirm dialog) now also
+  // saves the score, but ONLY if the user sang past 70% of the song --
+  // below that threshold the performance is considered too incomplete to
+  // count, and is discarded exactly as before. This is IN ADDITION TO the
+  // natural-completion path (showResults), not a replacement for it --
+  // guarded by the same autoSaveTriggeredRef so a song that later reaches
+  // its true end never double-submits.
+  // Explicit "Submit Score" button on the results screen -- previously
+  // saving was fully silent/automatic (immediate for signed-in, 3s delay
+  // for anonymous), which left people unsure whether/when it actually
+  // happened. This gives clear, visible control: click it and it saves
+  // right away, guarded by the same autoSaveTriggeredRef the automatic
+  // path uses, so clicking early cleanly cancels/supersedes the pending
+  // timer instead of both firing.
+  const handleManualSubmit = useCallback(() => {
+    if (autoSaveTriggeredRef.current) return; // already saving/saved via the automatic path
+    autoSaveTriggeredRef.current = true;
+    submitScoreToLeaderboard();
+  }, [submitScoreToLeaderboard]);
+
+  const handleLeaveWithScoreCheck = useCallback(() => {
+    const progressRatio = duration > 0 ? currentTime / duration : 0;
+    if (progressRatio >= 0.7 && !autoSaveTriggeredRef.current) {
+      autoSaveTriggeredRef.current = true;
+      submitScoreToLeaderboard();
+    }
+    pendingConfirmLeaveRef.current?.();
+  }, [duration, currentTime, submitScoreToLeaderboard]);
+
   const handleKeepSinging = useCallback(() => {
     setShowExitConfirm(false);
     if (wasPlayingBeforeExitPromptRef.current && audioRef.current) {
@@ -1302,7 +1331,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Pitch <span className="text-primary/70">(40%)</span></p>
+                <p className="text-xs text-muted-foreground">Pitch <span className="text-primary/70">(33%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
@@ -1310,7 +1339,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Rhythm <span className="text-primary/70">(30%)</span></p>
+                <p className="text-xs text-muted-foreground">Rhythm <span className="text-primary/70">(33%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
@@ -1318,7 +1347,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.technique / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Technique <span className="text-primary/70">(30%)</span></p>
+                <p className="text-xs text-muted-foreground">Technique <span className="text-primary/70">(33%)</span></p>
               </div>
             </div>
           </>
@@ -1358,6 +1387,23 @@ const Sing = () => {
                         maxLength={30}
                         className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
                       />
+                    </div>
+                  )}
+
+                  {/* Explicit submit control -- visible until saving starts.
+                      The automatic timer (immediate for signed-in, 3s delay
+                      for anonymous) still runs in the background as a
+                      fallback for anyone who doesn't interact; clicking
+                      this just does it right away instead of waiting. */}
+                  {scoreSaveStatus === 'idle' && (
+                    <div className="mb-4">
+                      <Button
+                        onClick={handleManualSubmit}
+                        size="sm"
+                        className="gradient-primary text-primary-foreground"
+                      >
+                        Submit Score
+                      </Button>
                     </div>
                   )}
 
@@ -1419,7 +1465,7 @@ const Sing = () => {
                     <Button
                       size="lg"
                       variant="destructive"
-                      onClick={() => pendingConfirmLeaveRef.current?.()}
+                      onClick={handleLeaveWithScoreCheck}
                     >
                       Leave
                     </Button>
