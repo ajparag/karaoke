@@ -1124,7 +1124,7 @@ const Sing = () => {
 
   // Trigger the auto-save exactly once when the song completes naturally.
   // For signed-in users: immediate. For anonymous (no user): delayed by
-  // 3 seconds so they have time to type their name in the input field
+  // 5 seconds so they have time to type their name in the input field
   // before the save fires. The name input disappears once saving starts.
   useEffect(() => {
     if (showResults && !autoSaveTriggeredRef.current) {
@@ -1146,7 +1146,7 @@ const Sing = () => {
             autoSaveTriggeredRef.current = true;
             submitScoreToLeaderboard();
           }
-        }, 3000);
+        }, 5000);
         return () => clearTimeout(timer);
       }
     }
@@ -1198,7 +1198,7 @@ const Sing = () => {
   // guarded by the same autoSaveTriggeredRef so a song that later reaches
   // its true end never double-submits.
   // Explicit "Submit Score" button on the results screen -- previously
-  // saving was fully silent/automatic (immediate for signed-in, 3s delay
+  // saving was fully silent/automatic (immediate for signed-in, 5s delay
   // for anonymous), which left people unsure whether/when it actually
   // happened. This gives clear, visible control: click it and it saves
   // right away, guarded by the same autoSaveTriggeredRef the automatic
@@ -1387,7 +1387,7 @@ const Sing = () => {
                   )}
 
                   {/* Explicit submit control -- visible until saving starts.
-                      The automatic timer (immediate for signed-in, 3s delay
+                      The automatic timer (immediate for signed-in, 5s delay
                       for anonymous) still runs in the background as a
                       fallback for anyone who doesn't interact; clicking
                       this just does it right away instead of waiting. */}
