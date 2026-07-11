@@ -3,7 +3,7 @@
 
 export const SILENCE_RMS = 0.015;
 export const PITCH_TOLERANCE_CENTS = 100; // 1 semitone -- tightened from 1.5 semitones
-export const ONSET_WINDOW_MS = 300; // tightened from 400ms -- offbeat singing should cost more
+export const ONSET_WINDOW_MS = 400; // piecewise credit curve: 100% at 0ms, 50% at 200ms, 10% at 400ms, 0% beyond
 
 /** RMS from Float32 time-domain samples. */
 export function rmsFloat(data: Float32Array): number {
@@ -181,10 +181,15 @@ export function scoreRhythm(
       if (d < best) { best = d; bestI = i; }
     }
     if (best <= tolerance && bestI >= 0) {
-      // Full linear falloff to 0 credit at the tolerance boundary (was
-      // floored at 50% credit even for a note landing right at the edge --
-      // offbeat singing needs to actually cost something).
-      matched += 1 - (best / tolerance);
+      // Piecewise-linear credit curve: 100% at 0ms, 50% at 200ms,
+      // 10% at 400ms, 0% beyond the tolerance window.
+      let credit: number;
+      if (best <= 200) {
+        credit = 1 - (best / 200) * 0.5;        // 0ms->100%, 200ms->50%
+      } else {
+        credit = 0.5 - ((best - 200) / 200) * 0.4; // 200ms->50%, 400ms->10%
+      }
+      matched += credit;
       used.add(bestI);
     }
   }
