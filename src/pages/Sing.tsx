@@ -97,6 +97,7 @@ const Sing = () => {
   const [isMuted, setIsMuted] = useState(false);
   const preEndTriggeredRef = useRef(false);
   const autoSaveTriggeredRef = useRef(false); // guards submitScoreToLeaderboard to fire once per completion
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // lets the guest-name input cancel the pending auto-save
 
   // -- Exit-confirm overlay (back button pressed mid-performance) ---------
   // Shows the same score/rating breakdown as the end-of-song results,
@@ -1141,13 +1142,15 @@ const Sing = () => {
         // The guard is now only claimed inside the timer callback, at the
         // actual moment of saving, and only if a manual click hasn't
         // already claimed it first.
-        const timer = setTimeout(() => {
+        autoSaveTimerRef.current = setTimeout(() => {
           if (!autoSaveTriggeredRef.current) {
             autoSaveTriggeredRef.current = true;
             submitScoreToLeaderboard();
           }
         }, 5000);
-        return () => clearTimeout(timer);
+        return () => {
+          if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        };
       }
     }
   }, [showResults, submitScoreToLeaderboard, user]);
@@ -1380,6 +1383,18 @@ const Sing = () => {
                         placeholder="Enter your name"
                         value={guestName}
                         onChange={(e) => setGuestName(e.target.value)}
+                        onFocus={() => {
+                          // No racing the clock while actually typing --
+                          // once the field is engaged, cancel the pending
+                          // auto-save entirely. Saving becomes manual from
+                          // here (the "Submit Score" button below), so
+                          // there's no countdown pressure while composing
+                          // a name.
+                          if (autoSaveTimerRef.current) {
+                            clearTimeout(autoSaveTimerRef.current);
+                            autoSaveTimerRef.current = null;
+                          }
+                        }}
                         maxLength={30}
                         className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
                       />
