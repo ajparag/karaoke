@@ -39,6 +39,32 @@ function cleanInteger(value: unknown, min: number, max: number, fallback: number
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+// Resolves "City, Country" from the request's client IP when the client
+// didn't already provide a city (this is the "no sign-in" / anonymous path
+// -- signed-in users may have set a city on their profile in the future,
+// but for now this covers everyone who submits without one).
+// Uses ipapi.co (free tier, HTTPS, no API key needed for light usage).
+// Any failure here is swallowed -- a broken geolocation lookup should never
+// block a score submission, it just means city stays null.
+async function geolocateFromIP(ip: string | null): Promise<string | null> {
+  if (!ip || ip === "unknown") return null;
+  try {
+    const resp = await fetch(`https://ipapi.co/${ip}/json/`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.error) return null; // ipapi.co returns { error: true, reason } on failure/rate-limit
+    const city = typeof data.city === "string" && data.city.trim() ? data.city.trim() : null;
+    const country = typeof data.country_name === "string" && data.country_name.trim() ? data.country_name.trim() : null;
+    if (city && country) return `${city}, ${country}`;
+    return city || country || null;
+  } catch (e) {
+    console.warn("[submit-score] IP geolocation failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -49,23 +75,26 @@ serve(async (req) => {
   }
 
   try {
+    // Auth is OPTIONAL. Signed-in users get their score attributed to
+    // their account (userId set, feeds their profile stats via the
+    // on_score_created trigger). Anyone else -- no account, no login --
+    // still gets their score saved to the public leaderboard, just with
+    // user_id left NULL. City/country for these anonymous submissions is
+    // resolved from their IP address further below.
     const authHeader = req.headers.get("authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return json({ error: "Unauthorized" }, 401);
-    }
+    let userId: string | null = null;
 
-    const authClient = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-
-    const token = authHeader.replace("Bearer ", "");
-    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
-    const userId = claimsData?.claims?.sub;
-
-    if (claimsError || !userId) {
-      return json({ error: "Unauthorized" }, 401);
+    if (authHeader?.startsWith("Bearer ")) {
+      const authClient = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_ANON_KEY")!,
+        { global: { headers: { Authorization: authHeader } } }
+      );
+      // getUser() is the stable method available in all supabase-js v2.x.
+      // getClaims() was used before but is unstable/unavailable in some
+      // versions and was causing the 500 crash.
+      const { data: userData } = await authClient.auth.getUser();
+      userId = userData?.user?.id ?? null;
     }
 
     const body = await req.json();
@@ -89,27 +118,49 @@ serve(async (req) => {
     const songArtist = cleanText(body.songArtist, 200);
     const thumbnailUrl = cleanText(body.thumbnailUrl, 1000);
     const displayName = cleanText(body.displayName, 50);
-    const city = cleanText(body.city, 50);
     const timingAccuracy = cleanInteger(body.timingAccuracy, 0, 100, 0);
     const rhythmAccuracy = cleanInteger(body.rhythmAccuracy, 0, 100, 0);
+
+    // x-forwarded-for is the standard header for the originating client IP
+    // behind Supabase's edge runtime proxy; first entry is the real client.
+    const forwardedFor = req.headers.get("x-forwarded-for");
+    const clientIp = forwardedFor ? forwardedFor.split(",")[0].trim() : null;
+
+    let city = cleanText(body.city, 50);
+    if (!city) {
+      const geolocated = await geolocateFromIP(clientIp);
+      city = geolocated ? cleanText(geolocated, 50) : null;
+    }
 
     const adminClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // Duplicate-submission check. Signed-in users dedupe by user_id (as
+    // before). Anonymous submissions have no user_id, so they dedupe by
+    // IP address instead -- same "one score per song per 24h" rule,
+    // applied via whichever identity we actually have.
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { data: existing, error: existingError } = await adminClient
+    let dedupeQuery = adminClient
       .from("scores")
       .select("id")
-      .eq("user_id", userId)
       .eq("track_id", trackId)
       .gte("created_at", since)
       .limit(1);
 
-    if (existingError) throw existingError;
-    if (existing && existing.length > 0) {
-      return json({ error: "You already submitted a score for this song in the last 24 hours" }, 409);
+    dedupeQuery = userId
+      ? dedupeQuery.eq("user_id", userId)
+      : clientIp
+        ? dedupeQuery.eq("ip_address", clientIp)
+        : dedupeQuery; // no userId AND no IP available -- skip dedupe, don't block a legitimate submission
+
+    if (userId || clientIp) {
+      const { data: existing, error: existingError } = await dedupeQuery;
+      if (existingError) throw existingError;
+      if (existing && existing.length > 0) {
+        return json({ error: "You already submitted a score for this song in the last 24 hours" }, 409);
+      }
     }
 
     const { data, error } = await adminClient
@@ -127,6 +178,7 @@ serve(async (req) => {
         duration_seconds: durationSeconds,
         display_name: displayName,
         city,
+        ip_address: userId ? null : clientIp, // only stored for anonymous dedupe -- not needed once a real account exists
       })
       .select("id")
       .single();
@@ -135,8 +187,14 @@ serve(async (req) => {
 
     return json({ id: data.id });
   } catch (error) {
+    // Log the FULL error so Supabase function logs show the real cause
+    // (Postgres constraint violation, auth issue, etc.) rather than just
+    // the generic wrapper message.
+    console.error("[submit-score] Error:", error);
+    if (error instanceof Error) {
+      console.error("[submit-score] Stack:", error.stack);
+    }
     const message = error instanceof Error ? error.message : "Failed to submit score";
-    console.error("[submit-score] Error:", message);
-    return json({ error: "Failed to submit score" }, 500);
+    return json({ error: message }, 500);
   }
 });

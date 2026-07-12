@@ -143,7 +143,10 @@ import {
 // ─── Public types ───────────────────────────────────────────────────────────
 
 export interface VocalsComparisonMetrics {
-  pitchMatch: number;       // 0–100, smoothed
+  pitchMatch: number;       // -100 to 100, smoothed -- CAN go negative (missed
+                             // frames during active vocals are penalized at -50
+                             // each; see the negative-marking logic below). Only
+                             // capped at 100 on the upper end, no floor at 0.
   rhythmMatch: number;      // 0–100, smoothed
   techniqueMatch: number;   // 0–100, smoothed
   volume: number;           // current user mic volume (raw)
@@ -172,13 +175,12 @@ const FFT_SIZE = 2048;
 const HISTORY_FRAMES = 60;
 const REF_VOCAL_THRESHOLD = 0.04; // higher than SILENCE_RMS (0.015) to ignore residual bleed in vocal stem          // ~1s of history at 60fps for technique scoring
 const SCORE_SMOOTHING = 0.12;       // EMA smoothing factor for displayed scores
-const MISS_PENALTY_CAP = 0.15;      // party-friendly: penalise missed sections lightly
 const REF_PARTIAL_CREDIT_NO_REFPITCH = 40;
 const REF_PARTIAL_CREDIT_NO_USERPITCH = 25;
 const ONSET_DEBOUNCE_MS = 100;
 const REF_BUFFER_TIMEOUT_MS = 4000;       // soft checkpoint — logs a warning, does not give up
 const REF_BUFFER_HARD_TIMEOUT_MS = 15000; // hard ceiling — actually gives up here
-const LOG_EVERY_N_FRAMES = 600;     // ~once per 10 seconds at 60fps — reduces log volume
+const LOG_EVERY_N_FRAMES = 36000;  // ~10 min at 60fps     // ~once per 10 seconds at 60fps — reduces log volume
 
 // =============================================================================
 // DIAGNOSTIC SYSTEM
@@ -913,8 +915,15 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
           pitchFramesRef.current++;
           if (!isVoiceDetected) {
             // User is silent during active reference vocals — a genuine miss.
+            // Negative marking: a fully-missed frame costs HALF what a
+            // perfect frame earns (-50 vs +100), so staying silent for the
+            // song is NOT a safe way to avoid a low pitch score -- it
+            // actively drags the average down, though less punishingly
+            // than full symmetric marking. A 50% sung well (~90) / 50%
+            // silent performance nets to roughly (90*0.5 + -50*0.5) = 20,
+            // vs full-symmetric's -5 or the original floor-at-0's 45.
             missedFramesRef.current++;
-            // Nothing added to the accumulator: this frame contributes 0.
+            pitchScoreAccRef.current += -50;
           } else if (refPitch > 0 && userPitch > 0) {
             // Normal case — both pitches detected, score the match directly.
             pitchScoreAccRef.current += scorePitchFrame(userPitch, refPitch, true);
@@ -934,8 +943,12 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
         const totalFrames = pitchFramesRef.current;
         const rawPitch = totalFrames > 0 ? pitchScoreAccRef.current / totalFrames : 0;
         const missRatio = totalFrames > 0 ? missedFramesRef.current / totalFrames : 0;
-        // Capped miss penalty — a shy/late singer should not be devastated.
-        const pitchFinal = rawPitch * (1 - missRatio * MISS_PENALTY_CAP);
+        // No secondary multiplier needed -- negative marking above already
+        // IS the proportional penalty. (The old MISS_PENALTY_CAP multiplier
+        // would now work backwards: multiplying an already-negative rawPitch
+        // by a positive fraction <1 makes it LESS negative, softening the
+        // penalty instead of adding to it.)
+        const pitchFinal = rawPitch;
 
         // Update prevReferenceActiveRef for next frame's history push gating.
         prevReferenceActiveRef.current = referenceActive;
@@ -981,7 +994,11 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
         }
 
         const newMetrics: VocalsComparisonMetrics = {
-          pitchMatch: clamp100(Math.round(smoothPitchRef.current)),
+          // NOT clamped to a 0 floor (unlike rhythm/technique below) --
+          // negative marking on missed frames needs to actually reach
+          // Sing.tsx's final score averaging. Upper bound still capped at
+          // 100 defensively (no per-frame contribution ever exceeds 100).
+          pitchMatch: Math.min(100, Math.round(smoothPitchRef.current)),
           rhythmMatch: clamp100(Math.round(smoothRhythmRef.current)),
           techniqueMatch: clamp100(Math.round(smoothTechRef.current)),
           volume: userVolume,
@@ -1049,10 +1066,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
 
   // ─── resetScores: full song-change reset, including reference teardown ────
 
-  const resetScores = useCallback(() => {
-    console.log('[HOOK] resetScores — full reset for new song');
-    teardownReferenceAudio();
-
+  const resetAccumulators = useCallback(() => {
     pitchScoreAccRef.current = 0;
     pitchFramesRef.current = 0;
     missedFramesRef.current = 0;
@@ -1067,13 +1081,18 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     prevRefSilentRef.current = true;
     lastUserOnsetRef.current = 0;
     lastRefOnsetRef.current = 0;
-    lastIsPlayingRef.current = undefined;
-
+    prevReferenceActiveRef.current = false;
     setMetrics({
       pitchMatch: 0, rhythmMatch: 0, techniqueMatch: 0,
       volume: 0, isVoiceDetected: false, referenceActive: false,
     });
-  }, [teardownReferenceAudio]);
+  }, []);
+
+  const resetScores = useCallback(() => {
+    teardownReferenceAudio();
+    resetAccumulators();
+    lastIsPlayingRef.current = undefined;
+  }, [teardownReferenceAudio, resetAccumulators]);
 
   // ─── setRefVolume: intentional no-op ───────────────────────────────────────
   // Kept for backward API compatibility with existing Sing.tsx call sites.
@@ -1116,6 +1135,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     startAnalysis,
     stopAnalysis,
     resetScores,
+    resetAccumulators,
     setRefVolume,
   };
 }

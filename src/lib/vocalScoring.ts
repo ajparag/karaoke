@@ -2,8 +2,8 @@
 // These are deterministic and unit-testable (no Web Audio dependencies).
 
 export const SILENCE_RMS = 0.015;
-export const PITCH_TOLERANCE_CENTS = 150; // 1.5 semitones -- party-friendly for casual singers
-export const ONSET_WINDOW_MS = 400; // generous for casual singers
+export const PITCH_TOLERANCE_CENTS = 100; // 1 semitone -- tightened from 1.5 semitones
+export const ONSET_WINDOW_MS = 400; // piecewise credit curve: 100% at 0ms, 50% at 200ms, 10% at 400ms, 0% beyond
 
 /** RMS from Float32 time-domain samples. */
 export function rmsFloat(data: Float32Array): number {
@@ -150,14 +150,6 @@ export function scorePitchFrame(
 }
 
 /**
- * Apply miss-ratio penalty to the raw averaged pitch score.
- * missRatio in [0,1]; max 50% penalty when every reference frame is missed.
- */
-export function applyMissPenalty(rawPitch: number, missRatio: number): number {
-  return rawPitch * (1 - missRatio * 0.5);
-}
-
-/**
  * Greedy onset matcher used for the rhythm score.
  * Mirrors the in-hook implementation so we can verify it deterministically.
  */
@@ -181,7 +173,15 @@ export function scoreRhythm(
       if (d < best) { best = d; bestI = i; }
     }
     if (best <= tolerance && bestI >= 0) {
-      matched += 1 - (best / tolerance) * 0.5;
+      // Piecewise-linear credit curve: 100% at 0ms, 50% at 200ms,
+      // 10% at 400ms, 0% beyond the tolerance window.
+      let credit: number;
+      if (best <= 200) {
+        credit = 1 - (best / 200) * 0.5;        // 0ms->100%, 200ms->50%
+      } else {
+        credit = 0.5 - ((best - 200) / 200) * 0.4; // 200ms->50%, 400ms->10%
+      }
+      matched += credit;
       used.add(bestI);
     }
   }

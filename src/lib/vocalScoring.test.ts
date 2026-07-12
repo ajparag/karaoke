@@ -4,7 +4,6 @@ import {
   detectPitchAC,
   centsDiff,
   scorePitchFrame,
-  applyMissPenalty,
   scoreRhythm,
   scoreTechnique,
   sineBuffer,
@@ -51,8 +50,13 @@ describe('centsDiff', () => {
   it('is ~100 cents for a semitone (440 → 466.16)', () => {
     expect(Math.abs(centsDiff(440, 466.16) - 100)).toBeLessThan(1);
   });
-  it('is ~1200 cents for an octave', () => {
-    expect(Math.abs(centsDiff(440, 880) - 1200)).toBeLessThan(0.001);
+  it('folds an octave apart to 0 cents (octave-invariant by design)', () => {
+    // centsDiff deliberately folds octaves -- singing the right note an
+    // octave up/down is treated as a perfect match (0 cents), not a
+    // 1200-cent miss. This is intentional (see the function's own doc
+    // comment): most casual singers naturally sing 1-2 octaves off from
+    // the reference, and that should still score well.
+    expect(centsDiff(440, 880)).toBe(0);
   });
   it('returns Infinity if either input is 0', () => {
     expect(centsDiff(0, 440)).toBe(Infinity);
@@ -67,31 +71,22 @@ describe('scorePitchFrame', () => {
   it('returns 100 for a perfect match', () => {
     expect(scorePitchFrame(440, 440, true)).toBe(100);
   });
-  it('returns ~80 at the edge of tolerance (60 cents)', () => {
+  it('returns ~80 at the edge of tolerance', () => {
     const off = 440 * Math.pow(2, PITCH_TOLERANCE_CENTS / 1200);
     expect(scorePitchFrame(off, 440, true)).toBeCloseTo(80, 0);
   });
-  it('drops into 40–80 band at ~90 cents off', () => {
-    const off = 440 * Math.pow(2, 90 / 1200);
+  it('drops into 40-80 band at 1.5x tolerance off', () => {
+    // Relative to the tolerance constant (not hardcoded cents) so this
+    // stays correct if PITCH_TOLERANCE_CENTS is retuned in the future.
+    const cents = PITCH_TOLERANCE_CENTS * 1.5;
+    const off = 440 * Math.pow(2, cents / 1200);
     const s = scorePitchFrame(off, 440, true);
     expect(s).toBeGreaterThan(40);
     expect(s).toBeLessThan(80);
   });
-  it('returns 5 for a wildly off pitch (>4× tolerance)', () => {
-    const off = 440 * Math.pow(2, 400 / 1200);
-    expect(scorePitchFrame(off, 440, true)).toBe(5);
-  });
-});
-
-describe('applyMissPenalty', () => {
-  it('no penalty at 0% missed', () => {
-    expect(applyMissPenalty(80, 0)).toBe(80);
-  });
-  it('50% penalty at 100% missed', () => {
-    expect(applyMissPenalty(80, 1)).toBe(40);
-  });
-  it('25% penalty at 50% missed', () => {
-    expect(applyMissPenalty(80, 0.5)).toBe(60);
+  it('returns the floor score for a wildly off pitch (>4x tolerance)', () => {
+    const off = 440 * Math.pow(2, (PITCH_TOLERANCE_CENTS * 4 + 50) / 1200);
+    expect(scorePitchFrame(off, 440, true)).toBe(20);
   });
 });
 
@@ -106,10 +101,11 @@ describe('scoreRhythm', () => {
     const ref = [100, 500, 900, 1300];
     expect(scoreRhythm(ref.slice(), ref)).toBe(100);
   });
-  it('drops to 50 when every onset is at the tolerance edge', () => {
-    // matched contribution per onset = 1 - (180/180)*0.5 = 0.5
+  it('drops to 50 credit at the curve midpoint (200ms off)', () => {
+    // Piecewise credit curve: 100% at 0ms, 50% at 200ms, 10% at 400ms.
+    // 200ms is the defined midpoint -- exactly 50% credit per onset.
     const ref = [100, 500, 900, 1300];
-    const user = ref.map((t) => t + 180);
+    const user = ref.map((t) => t + 200);
     expect(scoreRhythm(user, ref)).toBe(50);
   });
 
@@ -122,7 +118,7 @@ describe('scoreRhythm', () => {
     const ref = [100, 500, 900];
     const user = [100, 500, 900, 1500, 2000, 2500, 3000, 3500];
     const s = scoreRhythm(user, ref);
-    expect(s).toBe(100 - 15); // capped 15-pt penalty
+    expect(s).toBe(100 - 10); // capped 10-pt penalty (min(10, extra*2))
   });
 });
 

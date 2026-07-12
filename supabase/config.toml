@@ -11,15 +11,12 @@
 #   The default timeout is 150s. To increase it, go to your Supabase Dashboard.
 # =============================================================================
 
-project_id = "wnfgqlywaecvbptjvktt"
+project_id = "ukkicbsuyskkkluhpqrx"
 
 [functions.proxy-audio]
 verify_jwt = false
 
 [functions.search-music]
-verify_jwt = false
-
-[functions.fetch-lyrics]
 verify_jwt = false
 
 [functions.separate-vocals]

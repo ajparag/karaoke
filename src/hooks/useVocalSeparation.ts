@@ -15,10 +15,20 @@
 //     Previously hfSpaceWarmedUp=true was permanent, so if the container
 //     went cold after idle timeout, warmup was silently skipped.
 //   GPU: batch_size 32->64, overlap 0.1->0.025 (in modal_app.py).
+//
+// v5 -- CURRENT: Re-introduced IndexedDB caching, but as a pure fast-path
+//   lookup only -- streaming mode is untouched and remains the default for
+//   every first play. Before calling Modal, we check IndexedDB for a
+//   previously-cached instrumental/vocals blob for this exact audioUrl.
+//   Cache HIT -> instant playback via object URLs, zero Modal calls, zero
+//   GPU cost. Cache MISS -> falls through to the normal streaming pipeline
+//   exactly as before. The actual save-to-cache happens elsewhere (Sing.tsx,
+//   only after the song has fully buffered) -- this file only ever reads
+//   the cache, it does not write to it.
 // =============================================================================
 
 import { useState, useCallback, useRef } from 'react';
-import { clearOldCache } from '@/lib/audioCache';
+import { clearOldCache, getCachedTracks } from '@/lib/audioCache';
 import { supabase } from '@/integrations/supabase/client';
 
 interface SeparationResult {
@@ -110,13 +120,24 @@ if (typeof window !== 'undefined') {
 // WARMUP
 // =============================================================================
 
-const MODAL_URL = 'https://ajparag--vocal-separator-v3-vocalseparator-ui.modal.run';
-const WARMUP_STALE_MS = 3 * 60 * 1000; // re-ping if >3 min since last warmup
+// Two-tier GPU deployment: FAST (A10G) for anything a live user is
+// waiting on, BACKGROUND (T4, cheaper/slower) for silent pre-separation
+// of queued party songs with minutes of buffer before they're needed.
+const MODAL_URL_FAST = 'https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run';
+const MODAL_URL_BACKGROUND = 'https://ajparag--vocal-separator-v3-vocalseparatorbackground-ui.modal.run';
+const MODAL_API_KEY = 'pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32';
+
+export type SeparationTier = 'fast' | 'background';
+const WARMUP_STALE_MS = 1 * 60 * 1000; // re-ping if >1 min since last warmup
 
 let lastWarmupTs = 0;
 let warmUpPromise: Promise<void> | null = null;
 
-const separationPromiseCache = new Map<string, Promise<SeparationResult | null>>();
+interface InFlightSeparation {
+  promise: Promise<SeparationResult | null>;
+  tier: SeparationTier;
+}
+const separationPromiseCache = new Map<string, InFlightSeparation>();
 
 export async function warmUpHFSpace(): Promise<void> {
   // Re-ping if warmup is stale (container may have gone cold after idle timeout)
@@ -170,32 +191,72 @@ export function useVocalSeparation() {
   const [progress, setProgress] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [separatedAudio, setSeparatedAudio] = useState<SeparationResult | null>(null);
+  const [activeTier, setActiveTier] = useState<SeparationTier>('fast');
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const separateVocals = useCallback(async (audioUrl: string): Promise<SeparationResult | null> => {
+  const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast'): Promise<SeparationResult | null> => {
     setIsProcessing(true);
-    setProgress('Starting AI separation...');
+    setProgress('Checking cache...');
     setError(null);
 
-    // Deduplicate: if separation already in-flight for this URL, attach to it
+    // Deduplicate FIRST, before any await (including the cache check).
+    // This must happen synchronously relative to any other caller for the
+    // SAME audioUrl -- e.g. Party Mode's background (T4) pre-separation of
+    // the next queued song, and Sing.tsx's normal fast (A10G) call for
+    // that same song once the host taps Play. If the dedup check ran
+    // AFTER an awaited cache lookup (as it used to), both callers could
+    // pass the empty check before either claimed the slot -- because the
+    // await yields control back to the browser, letting a second call's
+    // own cache-check run in the gap. Claiming the slot with zero awaits
+    // in between closes that race: whichever call reaches this line first
+    // wins and does the real work (cache check, then Modal if needed);
+    // every other caller for the same URL just attaches to that one
+    // shared result, regardless of which tier or page triggered it.
     const existing = separationPromiseCache.get(audioUrl);
     if (existing) {
+      // Expose the ACTUAL tier already in flight, not the tier this
+      // particular caller happened to request -- e.g. Sing.tsx asks for
+      // 'fast' by default, but if it's attaching to Party Mode's
+      // already-running 'background' pre-separation, the wait screen
+      // needs to know it's really waiting on the slower T4 tier.
+      setActiveTier(existing.tier);
       setProgress('AI vocal separation in progress...');
-      const result = await existing;
+      const result = await existing.promise;
       if (result) setSeparatedAudio(result);
       setProgress('');
       setIsProcessing(false);
       return result;
     }
 
+    setActiveTier(tier);
     let resolveShared!: (value: SeparationResult | null) => void;
     const shared = new Promise<SeparationResult | null>((resolve) => {
       resolveShared = resolve;
     });
-    separationPromiseCache.set(audioUrl, shared);
+    separationPromiseCache.set(audioUrl, { promise: shared, tier });
     abortControllerRef.current = new AbortController();
 
     try {
+      // Cache check now happens INSIDE the claimed slot -- no one else can
+      // race past this, since they'd already have attached to `shared` above.
+      try {
+        const cached = await getCachedTracks(audioUrl);
+        if (cached) {
+          sepLog('CACHE', 'IndexedDB HIT -- skipping Modal, instant playback');
+          const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
+          const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
+          const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
+          setSeparatedAudio(result);
+          setProgress('');
+          setIsProcessing(false);
+          resolveShared(result);
+          return result;
+        }
+      } catch (e) {
+        console.warn('[VocalSeparation] Cache check failed (non-fatal, falling through to Modal):', e);
+      }
+
+      setProgress('Starting AI separation...');
       clearOldCache(7).catch(() => {});
 
       const t0 = Date.now();
@@ -212,9 +273,12 @@ export function useVocalSeparation() {
       setProgress('AI is separating vocals...');
       sepLog('SEP', `${elapsed()} Calling /separate-by-url...`);
 
-      const resp = await fetch(`${MODAL_URL}/separate-by-url`, {
+      const modalUrl = tier === 'background' ? MODAL_URL_BACKGROUND : MODAL_URL_FAST;
+      sepLog('SEP', `Using ${tier.toUpperCase()} tier (${tier === 'background' ? 'T4' : 'A10G'})`);
+
+      const resp = await fetch(`${modalUrl}/separate-by-url`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': MODAL_API_KEY },
         body: JSON.stringify({ audio_url: audioUrl }),
       });
 
@@ -224,8 +288,8 @@ export function useVocalSeparation() {
       }
 
       const json = await resp.json();
-      const instUrl = json?.instrumental_url ? `${MODAL_URL}${json.instrumental_url}` : null;
-      const vocUrl = json?.vocal_url ? `${MODAL_URL}${json.vocal_url}` : null;
+      const instUrl = json?.instrumental_url ? `${modalUrl}${json.instrumental_url}` : null;
+      const vocUrl = json?.vocal_url ? `${modalUrl}${json.vocal_url}` : null;
 
       if (!instUrl) throw new Error('No instrumental URL returned');
 
@@ -259,7 +323,7 @@ export function useVocalSeparation() {
       resolveShared(null);
       return null;
     } finally {
-      if (separationPromiseCache.get(audioUrl) === shared) {
+      if (separationPromiseCache.get(audioUrl)?.promise === shared) {
         separationPromiseCache.delete(audioUrl);
       }
       abortControllerRef.current = null;
@@ -274,5 +338,5 @@ export function useVocalSeparation() {
     setSeparatedAudio(null);
   }, []);
 
-  return { isProcessing, progress, error, separatedAudio, separateVocals, reset };
+  return { isProcessing, progress, error, separatedAudio, separateVocals, reset, activeTier };
 }

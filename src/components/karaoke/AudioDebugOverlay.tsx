@@ -23,7 +23,7 @@ export function AudioDebugOverlay({ debug }: { debug: Debug }) {
       <Card className="bg-card/90 backdrop-blur border-border p-3 text-foreground">
         <div className="flex items-center justify-between">
           <p className="text-sm font-medium">Audio Debug</p>
-          <p className="text-xs text-muted-foreground">Lenovo/Edge</p>
+          <p className="text-xs text-muted-foreground">?debugAudio=1</p>
         </div>
         <div className="mt-2 space-y-1 text-xs">
           <div className="flex justify-between"><span className="text-muted-foreground">micActive</span><span>{String(debug.micActive)}</span></div>

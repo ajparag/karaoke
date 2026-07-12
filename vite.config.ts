@@ -6,8 +6,12 @@ import path from "path";
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  // GitHub Pages serves from /karaoke/ — VITE_BASE_PATH is set by the
-  // GitHub Actions workflow. Locally (npm run dev) it stays as '/'.
+  // Custom domain (karaokeparty.in) serves from root, so base is just "/".
+  // NOTE: deploy.yml sets a VITE_BASE_PATH env var during build, but this
+  // config never actually reads it -- both happen to resolve to "/" so
+  // there's no live bug, but that env var is vestigial (likely left over
+  // from an earlier setup before the custom domain, e.g. a GitHub Pages
+  // subpath deployment).
   base: "/",
   server: {
     host: "::",
@@ -18,10 +22,6 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
-  },
-  define: {
-    // Polyfill for @gradio/client which uses Node.js Buffer API in browser
-    global: "globalThis",
   },
   build: {
     // Raise the chunk warning limit — this app has large deps (HuggingFace, Gradio)

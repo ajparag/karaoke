@@ -2,30 +2,33 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-
-} from "@/components/ui/dialog";
 import {
   AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
+  AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Save, Volume2, VolumeX, Search, Check, Loader2 } from "lucide-react";
+import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Volume2, VolumeX, Search, Check, Loader2, Share2, X, Home } from "lucide-react";
 import { SeparationWaitScreen } from "@/components/SeparationWaitScreen";
 import { VocalsIcon } from "@/components/icons/VocalsIcon";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalsComparison } from "@/hooks/useVocalsComparison";
 import { useAuth } from "@/hooks/useAuth";
+import { useTheme } from "@/hooks/useTheme";
 import { Slider } from "@/components/ui/slider";
 import { useVocalSeparation } from "@/hooks/useVocalSeparation";
-import { ScoreSubmissionDialog } from "@/components/karaoke/ScoreSubmissionDialog";
 import { AudioDebugOverlay } from "@/components/karaoke/AudioDebugOverlay";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
+import { analyzeVocalActivity, getLineSingingDuration, type VocalInterval } from "@/lib/vocalActivityAnalyzer";
+import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
+import { saveCachedTracks } from "@/lib/audioCache";
+import { useWakeLock } from "@/hooks/useWakeLock";
+import { setAudioSessionType } from "@/lib/audioPermissions";
 
 interface Track {
   id: string;
@@ -36,6 +39,7 @@ interface Track {
   source: 'saavn';
   audioUrl: string;
   album?: string;
+  language?: string; // "hindi", "punjabi", "english", etc. from Saavn
 }
 
 interface LyricLine {
@@ -59,10 +63,16 @@ const Sing = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { user, session } = useAuth();
+  const { isDark } = useTheme();
   
   const [track, setTrack] = useState<Track | null>(null);
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Keep screen awake while actively singing. Held whenever the song is
+  // playing (isPlaying) -- released automatically when paused, when the
+  // song ends, or when navigating away (component unmount).
+  useWakeLock(isPlaying);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const trackDurationSecs = track?.duration ? parseDurationToSeconds(track.duration) ?? 0 : 0;
@@ -76,15 +86,39 @@ const Sing = () => {
   const [separationStartedAt, setSeparationStartedAt] = useState<number | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [guestName, setGuestName] = useState('');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
   const [isMuted, setIsMuted] = useState(false);
-  const [showScoreSubmission, setShowScoreSubmission] = useState(false);
   const preEndTriggeredRef = useRef(false);
+  const autoSaveTriggeredRef = useRef(false); // guards submitScoreToLeaderboard to fire once per completion
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // lets the guest-name input cancel the pending auto-save
+
+  // -- Exit-confirm overlay (back button pressed mid-performance) ---------
+  // Shows the same score/rating breakdown as the end-of-song results,
+  // with Leave / Keep Singing choices instead of Try Again / Save Score.
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const pendingConfirmLeaveRef = useRef<(() => void) | null>(null);
+  const wasPlayingBeforeExitPromptRef = useRef(false);
+
+  // -- Pause checkpoint overlay ---------------------------------------------
+  // Shows the same score/rating breakdown with an encouraging message when
+  // the user pauses after 30+ seconds of singing since the last checkpoint
+  // (or song start). Quick pause/resume taps (e.g. adjusting volume) don't
+  // trigger it.
+  const [showPauseCheckpoint, setShowPauseCheckpoint] = useState(false);
+  const lastCheckpointAtSecondsRef = useRef(0);
+
+  // -- IndexedDB caching (background, post-buffer-complete only) ----------
+  // Fires once per track, only after the song has FULLY buffered -- never
+  // interferes with streaming playback or the initial reference-audio load.
+  const cachingTriggeredRef = useRef(false);
   
   // Lyrics search dialog state
   // Lyrics: fetched silently in background. No dialog/popup.
   const [lyricsNotFound, setLyricsNotFound] = useState(false);
+  const [vocalIntervals, setVocalIntervals] = useState<VocalInterval[] | null>(null);
   
   // Main instrumental audio
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -97,39 +131,60 @@ const Sing = () => {
   const scoreAccumulatorRef = useRef({ pitch: 0, rhythm: 0, technique: 0, count: 0 });
 
   // New scoring weights: Pitch 40%, Rhythm 30%, Technique 30% (no diction)
-  const SCORE_WEIGHTS = useRef({ pitch: 0.4, rhythm: 0.3, technique: 0.3 }).current;
+  const SCORE_WEIGHTS = useRef({ pitch: 1/3, rhythm: 1/3, technique: 1/3 }).current;
 
-  // ── Android hardware volume fix ─────────────────────────────────────────
-  // On Android, hardware volume buttons control call/ringtone volume until
-  // media playback starts. Creating a silent AudioContext on mount tells
-  // Android to route volume buttons to media volume immediately.
-  // Also works on iOS via the webkit prefix.
+  // -- Android hardware volume: audioSession declaration only -------------
+  // REMOVED: the old silent-oscillator-AudioContext trick. That trick
+  // solves a DIFFERENT problem (Android not knowing what stream to route
+  // volume keys to before ANY audio has ever played) -- it does nothing
+  // for this app's actual issue, which is that getUserMedia's required
+  // echoCancellation (needed to stop the mic picking up speaker bleed,
+  // see requestMicrophone() in audioPermissions.ts) tags the mic capture
+  // as a voice/communication session at the OS level. That tagging is
+  // what pulls Android's hardware volume keys toward the call/voice
+  // stream -- a silent oscillator "signaling media is playing" never
+  // touched that mechanism at all, since our real instrumental track
+  // already establishes STREAM_MUSIC playback on its own the moment it
+  // starts, with zero tricks needed (this is standard <audio> behavior
+  // on Android). Keeping the oscillator around was unnecessary
+  // complexity solving a non-problem.
+  //
+  // What's left: the audioSession API declaration below is a real,
+  // independent lever -- it doesn't need any AudioContext/oscillator to
+  // exist, it's a standalone navigator-level hint. 'play-and-record' is
+  // the semantically correct type for an app that plays audio AND
+  // records the mic simultaneously (this app's exact situation).
+  //
+  // Full honesty: this remains the more promising lever we have, not a
+  // guaranteed fix -- AEC must stay on the mic stream (removing it risks
+  // reintroducing the inverted-scores bug from speaker bleed), and no
+  // client-side web API can force Android's stream classification once
+  // an AEC-tagged capture stream is active, on every device/OS version.
   useEffect(() => {
-    try {
-      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!Ctx) return;
-      const silentCtx = new Ctx();
-      // Create a silent oscillator to "start" media playback
-      const osc = silentCtx.createOscillator();
-      const gain = silentCtx.createGain();
-      gain.gain.value = 0; // completely silent
-      osc.connect(gain);
-      gain.connect(silentCtx.destination);
-      osc.start();
-      osc.stop(silentCtx.currentTime + 0.001); // stop after 1ms
-      // Set audio session type for volume routing
-      if ('audioSession' in navigator && (navigator as any).audioSession) {
-        try { (navigator as any).audioSession.type = 'playback'; } catch {}
-      }
-      console.log('[audio] Silent media context created for volume button routing');
-      // Clean up after a short delay
-      setTimeout(() => {
-        try { silentCtx.close(); } catch {}
-      }, 1000);
-    } catch (e) {
-      console.warn('[audio] Silent context failed:', e);
-    }
+    setAudioSessionType('play-and-record');
   }, []);
+
+  // MediaSession API: the standard, OS-recognized way to declare active
+  // media playback. Android's hardware volume button routing specifically
+  // checks for an active MediaSession, not just any AudioContext -- the
+  // silent-oscillator trick above is a fallback for older/less-compliant
+  // browsers, but this is the primary, more reliable mechanism on modern
+  // Chrome/Android. Kept in sync with isPlaying and the track's own
+  // metadata for the whole song, not just a one-time mount trick.
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !track) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.title || 'KaraokeParty',
+        artist: track.artist || '',
+        album: 'KaraokeParty',
+        artwork: track.thumbnail ? [{ src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }] : [],
+      });
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch (e) {
+      console.warn('[audio] MediaSession sync failed:', e);
+    }
+  }, [track, isPlaying]);
 
   // AI-based vocal separation - loads from IndexedDB cache (separation happens on Index page)
   const {
@@ -137,6 +192,7 @@ const Sing = () => {
     progress: cacheProgress,
     separatedAudio,
     separateVocals: loadFromCache,
+    activeTier,
   } = useVocalSeparation();
 
   // Vocals comparison hook - compares user singing with AI-separated vocals
@@ -147,6 +203,7 @@ const Sing = () => {
     startAnalysis,
     stopAnalysis,
     resetScores,
+    resetAccumulators,
     setRefVolume,
   } = useVocalsComparison({
     vocalsUrl: separatedAudio?.vocalsUrl,
@@ -175,15 +232,15 @@ const Sing = () => {
           if (parsedLyrics && parsedLyrics.length > 0) {
             setLyrics(parsedLyrics);
           } else {
-            fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration);
+            fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration, parsed.language);
           }
         } catch {
-          fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration);
+          fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration, parsed.language);
         }
         // Clean up after use
         sessionStorage.removeItem('prefetchedLyrics');
       } else {
-        fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration);
+        fetchLyrics(parsed.title, parsed.artist, parsed.album, parsed.duration, parsed.language);
       }
     } else {
       navigate('/');
@@ -204,11 +261,48 @@ const Sing = () => {
 
       loadFromCache(track.audioUrl).then((result) => {
         if (result) {
-          console.log('[sing] Loaded separated audio:', result.fromCache ? 'cached' : 'processed');
         }
       });
     }
   }, [track?.audioUrl, separatedAudio, isLoadingFromCache, loadFromCache, isTestPlayerMode]);
+
+  // Reset per-track guards (caching, checkpoint timer) once per genuinely new
+  // track -- keyed on audioUrl so it does not fire again on unrelated re-runs.
+  const perTrackResetRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!track?.audioUrl) return;
+    if (perTrackResetRef.current === track.audioUrl) return;
+    perTrackResetRef.current = track.audioUrl;
+    cachingTriggeredRef.current = false;
+    lastCheckpointAtSecondsRef.current = 0;
+    setVocalIntervals(null); // reset for new track
+  }, [track?.audioUrl]);
+
+  // -- Vocal activity analysis for accurate lyric highlighting --------
+  // Runs once per song when the vocals stem URL becomes available.
+  // Decodes the full audio buffer and scans it for vocal energy to build
+  // a precise timeline of "singer is singing" vs "instrumental gap."
+  // The result is used by the highlight renderer below to compute how
+  // long each lyric line actually takes to sing, so the pink highlight
+  // finishes promptly when the vocals stop instead of crawling through
+  // instrumental gaps.
+  const vocalAnalysisTriggeredRef = useRef<string | null>(null);
+  useEffect(() => {
+    const vocalsUrl = separatedAudio?.vocalsUrl;
+    if (!vocalsUrl) return;
+    if (vocalAnalysisTriggeredRef.current === vocalsUrl) return;
+    vocalAnalysisTriggeredRef.current = vocalsUrl;
+
+    // Fire in the background -- never blocks playback or scoring
+    analyzeVocalActivity(vocalsUrl).then((intervals) => {
+      if (intervals && intervals.length > 0) {
+        setVocalIntervals(intervals);
+        console.log('[Sing] Vocal activity analysis complete:', intervals.length, 'intervals');
+      }
+    }).catch(() => {
+      // Non-fatal -- highlight falls back to the LRC gap-based estimate
+    });
+  }, [separatedAudio?.vocalsUrl]);
 
   // Initialize HTML5 Audio Player - Demucs instrumental or fallback to original
   useEffect(() => {
@@ -234,15 +328,12 @@ const Sing = () => {
     const audio = new Audio();
     audioRef.current = audio;
 
-    // Set audio session type to 'playback' for proper volume button behavior on mobile
-    if ('audioSession' in navigator && (navigator as any).audioSession) {
-      try {
-        (navigator as any).audioSession.type = 'playback';
-        console.log('[audio] Set audio session type to playback');
-      } catch (e) {
-        console.log('[audio] Could not set audio session type:', e);
-      }
-    }
+    // 'play-and-record', not 'playback' -- this app records the mic at
+    // the same time it plays the instrumental, so 'playback' alone is an
+    // inaccurate declaration that the browser can (and likely does)
+    // override once it sees an active AEC-enabled input stream. See the
+    // longer explanation in the mount-effect silent-context setup above.
+    setAudioSessionType('play-and-record');
 
     const stopTimeSync = () => {
       if (timeSyncRafRef.current != null) {
@@ -294,7 +385,6 @@ const Sing = () => {
 
     const onCanPlay = () => markReady('canplay');
     audio.addEventListener('canplay', onCanPlay);
-    audio.addEventListener('canplaythrough', () => console.log('[sing] canplaythrough fired'));
     audio.addEventListener('progress', () => {
       if (audio.buffered.length > 0) {
         // Log buffering progress at most once every 10 seconds to reduce log volume
@@ -302,11 +392,43 @@ const Sing = () => {
         if (bufferedEnd % 10 === 0) {
           console.log('[sing] progress: buffered', bufferedEnd, 's');
         }
+
+        // Once the song has FULLY buffered (not just enough to play), cache
+        // the separated stems in IndexedDB in the background for instant
+        // replay next time. Fires once per track. Streaming playback is
+        // completely untouched -- this only runs after buffering is
+        // already complete, well clear of the reference-audio load window.
+        if (
+          !cachingTriggeredRef.current &&
+          audio.duration > 0 &&
+          audio.buffered.end(audio.buffered.length - 1) >= audio.duration - 1 &&
+          separatedAudio &&
+          !separatedAudio.fromCache &&
+          track?.audioUrl
+        ) {
+          cachingTriggeredRef.current = true;
+          const instUrl = separatedAudio.instrumentalUrl;
+          const vocUrl = separatedAudio.vocalsUrl;
+          const originalAudioUrl = track.audioUrl;
+          (async () => {
+            try {
+              console.log('[Cache] Song fully buffered -- caching stems in background');
+              const instResp = await fetch(instUrl);
+              const instBlob = await instResp.blob();
+              let vocBlob: Blob | undefined;
+              if (vocUrl) {
+                const vocResp = await fetch(vocUrl);
+                vocBlob = await vocResp.blob();
+              }
+              await saveCachedTracks(originalAudioUrl, instBlob, vocBlob);
+              console.log('[Cache] Saved to IndexedDB -- instant replay next time');
+            } catch (e) {
+              console.warn('[Cache] Background caching failed (non-fatal):', e);
+            }
+          })();
+        }
       }
     });
-    audio.addEventListener('stalled', () => console.log('[sing] stalled'));
-    audio.addEventListener('waiting', () => console.log('[sing] waiting'));
-    audio.addEventListener('suspend', () => console.log('[sing] suspend'));
 
     const onTimeUpdate = () => {
       if (!isMounted) return;
@@ -427,7 +549,7 @@ const Sing = () => {
     };
   }, [track?.audioUrl, toast, stopAnalysis, separatedAudio?.instrumentalUrl, isTestPlayerMode, session?.access_token]);
 
-  // ── Audible guide vocals (separate from hook's muted analysis element) ────
+  // -- Audible guide vocals (separate from hook's muted analysis element) ----
   // The hook's audio is muted so the mic doesn't pick up speaker output.
   // This element handles audible playback only — no Web Audio graph needed.
   useEffect(() => {
@@ -499,7 +621,7 @@ const Sing = () => {
     vocalsAudioRef.current.muted = isMuted || !vocalsEnabled || vocalsVolume === 0;
   }, [isMuted, vocalsEnabled, vocalsVolume]);
 
-  // ── Live score display ────────────────────────────────────────────────────
+  // -- Live score display ----------------------------------------------------
   // The hook already computes EMA-based pitchMatch/rhythmMatch/techniqueMatch.
   // All we need to do here is combine them with weights and scale to 0–1000.
   //
@@ -526,16 +648,34 @@ const Sing = () => {
       scoreAccumulatorRef.current.technique += technique;
       scoreAccumulatorRef.current.count     += 1;
 
-      const combined =
-        pitch     * SCORE_WEIGHTS.pitch +
-        rhythm    * SCORE_WEIGHTS.rhythm +
-        technique * SCORE_WEIGHTS.technique;
+      // BUG FIXED HERE: the headline score must be computed from the
+      // RUNNING AVERAGE (same source as the breakdown percentages below),
+      // not from this single instantaneous sample. The old code called
+      // setTotalScore() every 200ms using only the latest tick's pitch/
+      // rhythm/technique values -- so the "final" score shown at pause/
+      // song-end was whatever the score happened to be in that one instant,
+      // not an average across the performance. A rough final note or a
+      // brief dip right before pausing could tank the headline number even
+      // though the breakdown (a true session average) still looked strong
+      // -- e.g. Pitch 31% / Rhythm 17% / Technique 61% should combine to
+      // 358, but the instantaneous-snapshot bug was showing 304.
+      const { pitch: sumPitch, rhythm: sumRhythm, technique: sumTechnique, count } =
+        scoreAccumulatorRef.current;
+      const avgPitch = sumPitch / count;
+      const avgRhythm = sumRhythm / count;
+      const avgTechnique = sumTechnique / count;
 
-      // Scale 0–100 → 0–1000 for the displayed score.
-      // Because the hook's metrics are already EMA-smoothed, the displayed
-      // score rises when the singer is on pitch and recovers when they improve —
-      // it does NOT permanently trend downward from early cold frames.
-      setTotalScore(Math.round(combined * 10));
+      const combined =
+        avgPitch     * SCORE_WEIGHTS.pitch +
+        avgRhythm    * SCORE_WEIGHTS.rhythm +
+        avgTechnique * SCORE_WEIGHTS.technique;
+
+      // Scale 0-100 -> 0-1000 for the displayed score. Now derived from the
+      // same running averages as the breakdown, so the two always agree.
+      // Negative marking (missed notes during vocals) can drag the internal
+      // average below 0 -- that's the intended penalty. Floor only the
+      // final displayed/leaderboard number at 0 so it never shows negative.
+      setTotalScore(Math.max(0, Math.round(combined * 10)));
     };
 
     // Poll metricsRef at 5 Hz as a fallback display update
@@ -545,13 +685,13 @@ const Sing = () => {
   }, [isPlaying, isMicActive, SCORE_WEIGHTS]);
 
   
-  const fetchLyrics = async (title: string, artist: string, album?: string, durationStr?: string) => {
+  const fetchLyrics = async (title: string, artist: string, album?: string, durationStr?: string, language?: string) => {
     const dur = parseDurationToSeconds(durationStr);
     setLyrics([]);
 
     // Attempt 1: full params (title + artist + album + duration)
     try {
-      const data = await fetchLyricsCached({ title, artist, album, duration: dur });
+      const data = await fetchLyricsCached({ title, artist, album, duration: dur, language });
       if (data?.lyrics && data.lyrics.length > 0) {
         setLyrics(data.lyrics);
         setLyricsNotFound(false);
@@ -563,7 +703,7 @@ const Sing = () => {
 
     // Attempt 2: title + artist only (no album)
     try {
-      const data = await fetchLyricsCached({ title, artist, duration: dur });
+      const data = await fetchLyricsCached({ title, artist, duration: dur, language });
       if (data?.lyrics && data.lyrics.length > 0) {
         setLyrics(data.lyrics);
         setLyricsNotFound(false);
@@ -575,7 +715,7 @@ const Sing = () => {
 
     // Attempt 3: title only (broadest search)
     try {
-      const data = await fetchLyricsCached({ title, duration: dur });
+      const data = await fetchLyricsCached({ title, duration: dur, language });
       if (data?.lyrics && data.lyrics.length > 0) {
         setLyrics(data.lyrics);
         setLyricsNotFound(false);
@@ -593,7 +733,7 @@ const Sing = () => {
     if (track) {
       setLyricsNotFound(false);
       // Full cascade retry
-      fetchLyrics(track.title, track.artist, track.album, track.duration);
+      fetchLyrics(track.title, track.artist, track.album, track.duration, track.language);
     }
   };
 
@@ -622,8 +762,23 @@ const Sing = () => {
     if (isPlaying) {
       audio.pause();
       // Hook's vocals audio is paused via isPlaying prop update
+
+      // Pause checkpoint: only show the score/encouragement overlay if the
+      // user has actually sung for 30+ seconds since the last checkpoint
+      // (or song start). Quick pause/resume taps (adjusting volume, fixing
+      // the mic) stay silent -- this must not get in the way of normal use.
+      const elapsedSinceCheckpoint = audio.currentTime - lastCheckpointAtSecondsRef.current;
+      if (elapsedSinceCheckpoint >= 30) {
+        lastCheckpointAtSecondsRef.current = audio.currentTime;
+        setShowPauseCheckpoint(true);
+      }
       return;
     }
+
+    // Resuming from a checkpoint or exit-confirm -- make sure both overlays
+    // are dismissed so they don't linger over the resumed performance.
+    setShowPauseCheckpoint(false);
+    setShowExitConfirm(false);
 
     // CRITICAL: Start audio playback FIRST in the user gesture for mobile compatibility
     try {
@@ -679,10 +834,19 @@ const Sing = () => {
     setCurrentTime(0);
     setTotalScore(0);
     scoreAccumulatorRef.current = { pitch: 0, rhythm: 0, technique: 0, count: 0 };
-    resetScores();
+    // Use resetAccumulators (not resetScores) -- "Try Again" replays the
+    // SAME song, so the reference audio graph should stay alive. resetScores
+    // tears it down entirely, which was causing scoring to stop until the
+    // user manually toggled the mic button to rebuild it.
+    resetAccumulators();
     setShowResults(false);
-    setShowScoreSubmission(false);
+    setShowExitConfirm(false);
+    setShowPauseCheckpoint(false);
+    lastCheckpointAtSecondsRef.current = 0;
     preEndTriggeredRef.current = false;
+    autoSaveTriggeredRef.current = false;
+    setScoreSaveStatus('idle');
+    setGuestName('');
     separationStartedAtRef.current = null;
     setSeparationStartedAt(null);
     if (audioRef.current) {
@@ -692,114 +856,21 @@ const Sing = () => {
       vocalsAudioRef.current.currentTime = 0;
     }
     // Hook's vocals audio is synced via currentTime prop
-  }, [resetScores]);
+  }, [resetAccumulators]);
 
   // Score submission dialog is shown AFTER the song ends naturally (via onEnded).
   // We no longer interrupt the last few seconds of the song.
   // preEndTriggeredRef is kept for safety but no longer set mid-song.
   // (Previously this triggered at timeRemaining <= 3, cutting off the ending.)
 
-  const handleScoreSubmit = async (displayName: string, city: string) => {
-    if (!user || !track) {
-      toast({ title: "Please sign in to save scores", variant: "destructive" });
-      return;
-    }
 
-    setIsSaving(true);
-    try {
-      const avgPitch = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0;
-      const avgRhythm = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0;
 
-      const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' : 
-                   totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
-
-      const { error } = await supabase.functions.invoke('submit-score', {
-        body: {
-          songTitle: track.title,
-          songArtist: track.artist,
-          trackId: track.id,
-          score: totalScore,
-          rating: scoreRating,
-          timingAccuracy: Math.round(avgPitch),
-          rhythmAccuracy: Math.round(avgRhythm),
-          durationSeconds: Math.round(duration),
-          playedSeconds: Math.round(currentTime),
-          thumbnailUrl: track.thumbnail,
-          displayName,
-          city,
-        },
-      });
-
-      if (error) throw error;
-
-      toast({ title: "Score saved to leaderboard!" });
-      setShowScoreSubmission(false);
-      navigate('/leaderboard');
-    } catch (error) {
-      console.error('Failed to save score:', error);
-      toast({ title: "Failed to save score", variant: "destructive" });
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCloseScoreSubmission = () => {
-    setShowScoreSubmission(false);
-    setShowResults(true);
-  };
-
-  const handleSaveScore = async () => {
-    if (!user || !track) {
-      toast({ title: "Please sign in to save scores", variant: "destructive" });
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      const avgPitch = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0;
-      const avgRhythm = scoreAccumulatorRef.current.count > 0 
-        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0;
-
-      const rating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' : 
-                     totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
-
-      const { error } = await supabase.functions.invoke('submit-score', {
-        body: {
-          songTitle: track.title,
-          songArtist: track.artist,
-          trackId: track.id,
-          score: totalScore,
-          rating,
-          timingAccuracy: Math.round(avgPitch),
-          rhythmAccuracy: Math.round(avgRhythm),
-          durationSeconds: Math.round(duration),
-          playedSeconds: Math.round(currentTime),
-          thumbnailUrl: track.thumbnail,
-        },
-      });
-
-      if (error) throw error;
-
-      toast({ title: "Score saved!" });
-      navigate('/history');
-    } catch (error) {
-      console.error('Failed to save score:', error);
-      toast({ title: "Failed to save score", variant: "destructive" });
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const getScoreColor = (value: number) => {
-    if (value >= 80) return 'bg-score-perfect';
-    if (value >= 60) return 'bg-score-great';
-    if (value >= 40) return 'bg-score-good';
-    return 'bg-score-miss';
-  };
-
+  // -- Share score card ----------------------------------------------------
+  // Draws a shareable PNG (rating, score, breakdown, song, branding) on a
+  // canvas -- no extra library needed. Uses the Web Share API where
+  // available (opens the native share sheet -- WhatsApp, etc. on mobile),
+  // falling back to a plain text+link share, then to clipboard copy on
+  // browsers with no share API at all (most desktop browsers).
   const getRating = (score: number) => {
     if (score >= 900) return { letter: 'L', color: 'text-score-perfect' };
     if (score >= 800) return { letter: 'S', color: 'text-score-perfect' };
@@ -812,9 +883,343 @@ const Sing = () => {
 
   const rating = getRating(totalScore);
 
+  const generateScoreCardImage = useCallback((): Promise<Blob | null> => {
+    return new Promise((resolve) => {
+      const width = 1080;
+      const height = 1080;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(null); return; }
+
+      const ratingColors: Record<string, string> = {
+        L: '#facc15', S: '#facc15', A: '#4ade80', B: '#60a5fa',
+        C: '#fb923c', D: '#fb923c', F: '#f87171',
+      };
+      const ratingColor = ratingColors[rating.letter] || '#facc15';
+
+      // Background
+      const bg = ctx.createLinearGradient(0, 0, 0, height);
+      bg.addColorStop(0, '#1a0b2e');
+      bg.addColorStop(1, '#0a0612');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.textAlign = 'center';
+
+      // Branding
+      ctx.fillStyle = '#f472b6';
+      ctx.font = 'bold 44px sans-serif';
+      ctx.fillText('KaraokeParty', width / 2, 110);
+
+      // Song title + artist
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '34px sans-serif';
+      const title = (track?.title || 'Unknown Song').slice(0, 40);
+      ctx.fillText(title, width / 2, 175);
+      ctx.fillStyle = '#a1a1aa';
+      ctx.font = '26px sans-serif';
+      ctx.fillText((track?.artist || '').slice(0, 50), width / 2, 215);
+
+      // Rating letter
+      ctx.fillStyle = ratingColor;
+      ctx.font = 'bold 280px sans-serif';
+      ctx.fillText(rating.letter, width / 2, 540);
+
+      // Score
+      ctx.fillStyle = '#facc15';
+      ctx.font = 'bold 100px sans-serif';
+      ctx.fillText(String(totalScore), width / 2, 660);
+
+      // Breakdown
+      const count = scoreAccumulatorRef.current.count;
+      // Floored at 0 for display -- a shared score card showing "-30%"
+      // would look like a rendering bug rather than the intended penalty.
+      // The headline total score above still reflects the true (possibly
+      // heavily negative-marked) internal average.
+      const avgPitch = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.pitch / count)) : 0;
+      const avgRhythm = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.rhythm / count)) : 0;
+      const avgTechnique = count > 0 ? Math.max(0, Math.round(scoreAccumulatorRef.current.technique / count)) : 0;
+
+      const cols = [
+        { label: 'Pitch', value: avgPitch },
+        { label: 'Rhythm', value: avgRhythm },
+        { label: 'Technique', value: avgTechnique },
+      ];
+      const colWidth = width / 3;
+      cols.forEach((c, i) => {
+        const cx = colWidth * i + colWidth / 2;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 46px sans-serif';
+        ctx.fillText(`${c.value}%`, cx, 760);
+        ctx.fillStyle = '#a1a1aa';
+        ctx.font = '26px sans-serif';
+        ctx.fillText(c.label, cx, 800);
+      });
+
+      // Footer CTA
+      ctx.fillStyle = '#a1a1aa';
+      ctx.font = '30px sans-serif';
+      ctx.fillText('Think you can beat me?', width / 2, 960);
+      ctx.fillStyle = '#f472b6';
+      ctx.font = 'bold 34px sans-serif';
+      ctx.fillText('karaokeparty.in', width / 2, 1010);
+
+      canvas.toBlob((blob) => resolve(blob), 'image/png');
+    });
+  }, [rating, totalScore, track]);
+
+  const handleShareScore = useCallback(async () => {
+    const shareText = `I scored ${totalScore} (${rating.letter}) singing "${track?.title || 'a song'}" on KaraokeParty! Think you can beat me?`;
+    const shareUrl = 'https://karaokeparty.in';
+
+    try {
+      const blob = await generateScoreCardImage();
+
+      if (blob) {
+        const file = new File([blob], 'karaokeparty-score.png', { type: 'image/png' });
+        if (navigator.canShare?.({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: 'My KaraokeParty Score',
+            text: shareText,
+          });
+          return;
+        }
+      }
+
+      if (navigator.share) {
+        await navigator.share({ title: 'My KaraokeParty Score', text: shareText, url: shareUrl });
+        return;
+      }
+
+      // No Web Share API (most desktop browsers) -- copy text + link instead
+      await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
+      toast({ title: 'Copied to clipboard!', description: 'Paste it anywhere to share your score.' });
+    } catch (err) {
+      // User cancelling the native share sheet throws AbortError -- not a real failure
+      if ((err as any)?.name !== 'AbortError') {
+        console.error('[Share] Failed:', err);
+        toast({ title: 'Could not share', description: 'Please try again.', variant: 'destructive' });
+      }
+    }
+  }, [totalScore, rating, track, generateScoreCardImage, toast]);
+
+  // -- Automatic leaderboard save ------------------------------------------
+  // Fires once, automatically, the moment the song completes naturally --
+  // no button click required. Works whether or not the user is signed in:
+  //   - Signed in: saved under their real account via the normal
+  //     authenticated Supabase client.
+  //   - Not signed in: saved via an ISOLATED anonymous Supabase session
+  //     (submitScoreAnonymously) that never touches the app's main auth
+  //     state, so a guest never appears "logged in" anywhere else. Their
+  //     city/country is auto-detected server-side from their IP address
+  //     since there's no profile to pull a location from.
+  // If this song was played inside a Party, "Next" returns to the host's
+  // Party Stage (so they can start the next queued song) instead of the
+  // homepage. Clears the party context marker either way so a later solo
+  // song doesn't accidentally get attributed to a stale party.
+  const handleNextClick = useCallback(() => {
+    const partyContextRaw = sessionStorage.getItem('activePartyContext');
+    sessionStorage.removeItem('activePartyContext');
+    if (partyContextRaw) {
+      try {
+        const { code } = JSON.parse(partyContextRaw);
+        if (code) {
+          navigate(`/party/${code}/stage`);
+          return;
+        }
+      } catch { /* fall through to homepage */ }
+    }
+    navigate('/');
+  }, [navigate]);
+
+  const submitScoreToLeaderboard = useCallback(async () => {
+    if (!track) return;
+
+    setIsSaving(true);
+    setScoreSaveStatus('saving');
+    try {
+      // Floored at 0 before submission -- the backend clamps timingAccuracy
+      // to [0,100] anyway, but being explicit here keeps the stored value
+      // meaningful rather than relying on the server's safety clamp.
+      const avgPitch = Math.max(0, scoreAccumulatorRef.current.count > 0
+        ? scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count : 0);
+      const avgRhythm = Math.max(0, scoreAccumulatorRef.current.count > 0
+        ? scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count : 0);
+
+      const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A' :
+        totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
+
+      // Auth is optional at the API level now -- submit-score accepts both
+      // signed-in requests (attributed to the account, feeds profile stats)
+      // and anonymous ones (user_id left NULL, city auto-detected from IP
+      // server-side). Always go through the normal shared client; no
+      // separate anonymous-session workaround needed.
+      const displayName = (user && !user.is_anonymous)
+        ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
+        : (guestName.trim() || 'Guest');
+
+      const payload = {
+        songTitle: track.title,
+        songArtist: track.artist,
+        trackId: track.id,
+        score: totalScore,
+        rating: scoreRating,
+        timingAccuracy: Math.round(avgPitch),
+        rhythmAccuracy: Math.round(avgRhythm),
+        durationSeconds: Math.round(duration),
+        playedSeconds: Math.round(currentTime),
+        thumbnailUrl: track.thumbnail,
+        displayName,
+        // city intentionally omitted -- the edge function auto-detects it
+        // from the request's IP address when not provided.
+      };
+
+      const { error } = await supabase.functions.invoke('submit-score', { body: payload });
+      if (error) throw error;
+
+      setScoreSaveStatus('saved');
+      console.log('[Leaderboard] Score auto-saved:', totalScore, scoreRating);
+
+      // If this song was played as part of a Party (host-controlled stage),
+      // also write the score back to that stage's queue row so it shows up
+      // in the "Tonight's Scores" list on both the host and participant
+      // screens. Non-fatal if this fails -- the leaderboard save above is
+      // the source of truth; party display is a nice-to-have on top.
+      const partyContextRaw = sessionStorage.getItem('activePartyContext');
+      if (partyContextRaw) {
+        try {
+          const { queueId } = JSON.parse(partyContextRaw);
+          if (queueId) {
+            await supabase.from('stage_queue').update({
+              status: 'completed',
+              score: totalScore,
+              rating: scoreRating,
+            }).eq('id', queueId);
+          }
+        } catch (e) {
+          console.warn('[Party] Failed to write score back to stage:', e);
+        }
+      }
+    } catch (error) {
+      console.error('[Leaderboard] Auto-save failed:', error);
+      setScoreSaveStatus('failed');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [track, user, totalScore, duration, currentTime]);
+
+  // Trigger the auto-save exactly once when the song completes naturally.
+  // For signed-in users: immediate. For anonymous (no user): delayed by
+  // 5 seconds so they have time to type their name in the input field
+  // before the save fires. The name input disappears once saving starts.
+  useEffect(() => {
+    if (showResults && !autoSaveTriggeredRef.current) {
+      if (user) {
+        // Signed-in: claim the guard and save right away -- no window
+        // where a manual click could possibly beat this anyway.
+        autoSaveTriggeredRef.current = true;
+        submitScoreToLeaderboard();
+      } else {
+        // Anonymous: do NOT claim the guard yet. Claiming it here (before
+        // the delay) was the bug -- it locked out the "Submit Score"
+        // button for the entire 3-second window, since the button's click
+        // handler checks this same ref and always saw it already true.
+        // The guard is now only claimed inside the timer callback, at the
+        // actual moment of saving, and only if a manual click hasn't
+        // already claimed it first.
+        autoSaveTimerRef.current = setTimeout(() => {
+          if (!autoSaveTriggeredRef.current) {
+            autoSaveTriggeredRef.current = true;
+            submitScoreToLeaderboard();
+          }
+        }, 5000);
+        return () => {
+          if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        };
+      }
+    }
+  }, [showResults, submitScoreToLeaderboard, user]);
+
+  const getScoreColor = (value: number) => {
+    if (value >= 80) return 'bg-score-perfect';
+    if (value >= 60) return 'bg-score-great';
+    if (value >= 40) return 'bg-score-good';
+    return 'bg-score-miss';
+  };
+
+
+  // -- Back button guard (hardware/gesture back + in-app arrow) -----------
+  // Mid-performance is defined as: currently playing, OR paused partway
+  // through a song that has accumulated some score (not at the very start,
+  // not already showing results). Landing on the page or finishing the
+  // song normally does not need a confirmation -- there's nothing to lose.
+  const isMidPerformance = () => {
+    if (showResults) return false; // already finished, nothing to protect
+    if (isPlaying) return true;
+    return currentTime > 0 && scoreAccumulatorRef.current.count > 0;
+  };
+
+  const handleBackAttempt = useCallback((confirmLeave: () => void) => {
+    if (isMidPerformance()) {
+      // Pause playback while the confirm dialog is up -- letting it keep
+      // singing behind a "do you want to leave" prompt would be confusing.
+      wasPlayingBeforeExitPromptRef.current = isPlaying;
+      if (isPlaying && audioRef.current) {
+        audioRef.current.pause();
+      }
+      pendingConfirmLeaveRef.current = confirmLeave;
+      setShowExitConfirm(true);
+    } else {
+      confirmLeave();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, showResults, currentTime]);
+
+  useBackGuard(handleBackAttempt);
+  useBeforeUnloadGuard(isMidPerformance);
+
+  // Exiting mid-song (via "Leave" on the exit-confirm dialog) now also
+  // saves the score, but ONLY if the user sang past 70% of the song --
+  // below that threshold the performance is considered too incomplete to
+  // count, and is discarded exactly as before. This is IN ADDITION TO the
+  // natural-completion path (showResults), not a replacement for it --
+  // guarded by the same autoSaveTriggeredRef so a song that later reaches
+  // its true end never double-submits.
+  // Explicit "Submit Score" button on the results screen -- previously
+  // saving was fully silent/automatic (immediate for signed-in, 5s delay
+  // for anonymous), which left people unsure whether/when it actually
+  // happened. This gives clear, visible control: click it and it saves
+  // right away, guarded by the same autoSaveTriggeredRef the automatic
+  // path uses, so clicking early cleanly cancels/supersedes the pending
+  // timer instead of both firing.
+  const handleManualSubmit = useCallback(() => {
+    if (autoSaveTriggeredRef.current) return; // already saving/saved via the automatic path
+    autoSaveTriggeredRef.current = true;
+    submitScoreToLeaderboard();
+  }, [submitScoreToLeaderboard]);
+
+  const handleLeaveWithScoreCheck = useCallback(() => {
+    const progressRatio = duration > 0 ? currentTime / duration : 0;
+    if (progressRatio >= 0.7 && !autoSaveTriggeredRef.current) {
+      autoSaveTriggeredRef.current = true;
+      submitScoreToLeaderboard();
+    }
+    pendingConfirmLeaveRef.current?.();
+  }, [duration, currentTime, submitScoreToLeaderboard]);
+
+  const handleKeepSinging = useCallback(() => {
+    setShowExitConfirm(false);
+    if (wasPlayingBeforeExitPromptRef.current && audioRef.current) {
+      audioRef.current.play().catch(() => {});
+    }
+  }, []);
+
 
   return (
-    <div className="h-[100dvh] bg-background flex flex-col overflow-hidden">
+    <div className={`${isDark ? "dark" : ""} h-[100dvh] bg-background flex flex-col overflow-hidden`}>
       {showAudioDebug ? (
         <AudioDebugOverlay
           debug={{
@@ -834,7 +1239,7 @@ const Sing = () => {
       ) : null}
       {/* Header */}
       <header className="glass border-b border-border p-2 md:p-4 flex items-center gap-2 md:gap-4 shrink-0">
-        <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
+        <Button variant="ghost" size="icon" onClick={() => handleBackAttempt(() => navigate('/'))}>
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <div className="flex-1 min-w-0">
@@ -888,81 +1293,214 @@ const Sing = () => {
         </div>
       </header>
 
-      {/* Separation Wait Screen */}
+      {/* Separation Wait Screen -- estimate reflects the ACTUAL tier doing
+          the work (activeTier), not just what this page nominally
+          requested. Sing.tsx always asks for 'fast', but the dedup
+          system may attach it to an already-in-flight 'background' (T4)
+          job from Party Mode's pre-separation -- in that case the real
+          wait is meaningfully longer, and the estimate should reflect
+          that instead of understating it. */}
       <SeparationWaitScreen
         track={track}
         isVisible={!separatedAudio && !!track}
         startedAt={separationStartedAt}
-        estimatedSeconds={35}
+        estimatedSeconds={activeTier === 'background' ? 50 : 30}
       />
 
-      {/* Score Submission Dialog - appears 3 seconds before song ends */}
-      <ScoreSubmissionDialog
-        isOpen={showScoreSubmission}
-        onClose={handleCloseScoreSubmission}
-        onSubmit={handleScoreSubmit}
-        score={totalScore}
-        rating={rating}
-        songTitle={track?.title || 'Unknown Song'}
-        isSubmitting={isSaving}
-      />
-
-      {/* Results Overlay */}
-      {showResults && (
-        <div className="fixed inset-0 z-50 bg-background/95 flex items-center justify-center p-4 animate-fade-in">
-          <div className="text-center max-w-md">
+      {/* Shared score breakdown -- used by end-of-song results, exit-confirm,
+          and pause-checkpoint overlays so the three stay visually consistent. */}
+      {(() => {
+        const scoreBreakdown = (
+          <>
             <p className={`text-8xl font-bold mb-4 animate-scale-in ${rating.color}`}>
               {rating.letter}
             </p>
             <p className="text-5xl font-bold text-gradient-gold mb-8">{totalScore}</p>
-            
+
             <div className="grid grid-cols-3 gap-4 mb-6">
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
-                  {scoreAccumulatorRef.current.count > 0 
-                    ? Math.round(scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count) 
+                  {scoreAccumulatorRef.current.count > 0
+                    ? Math.round(scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Pitch <span className="text-primary/70">(40%)</span></p>
+                <p className="text-xs text-muted-foreground">Pitch <span className="text-primary/70">(33%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
-                  {scoreAccumulatorRef.current.count > 0 
-                    ? Math.round(scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count) 
+                  {scoreAccumulatorRef.current.count > 0
+                    ? Math.round(scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Rhythm <span className="text-primary/70">(30%)</span></p>
+                <p className="text-xs text-muted-foreground">Rhythm <span className="text-primary/70">(33%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
-                  {scoreAccumulatorRef.current.count > 0 
-                    ? Math.round(scoreAccumulatorRef.current.technique / scoreAccumulatorRef.current.count) 
+                  {scoreAccumulatorRef.current.count > 0
+                    ? Math.round(scoreAccumulatorRef.current.technique / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Technique <span className="text-primary/70">(30%)</span></p>
+                <p className="text-xs text-muted-foreground">Technique <span className="text-primary/70">(33%)</span></p>
               </div>
             </div>
-            
-            <div className="flex gap-4 justify-center">
-              <Button variant="outline" size="lg" onClick={handleRestart}>
-                <RotateCcw className="w-5 h-5 mr-2" />
-                Try Again
-              </Button>
-              {user && (
-                <Button 
-                  size="lg" 
-                  className="gradient-primary text-primary-foreground"
-                  onClick={handleSaveScore}
-                  disabled={isSaving}
+          </>
+        );
+
+        const checkpointMessage =
+          rating.letter === 'L' || rating.letter === 'S' || rating.letter === 'A'
+            ? "You're on fire! \ud83d\udd25"
+            : rating.letter === 'B' || rating.letter === 'C'
+              ? "You're doing great! Let's continue"
+              : "Keep going, you've got this!";
+
+        return (
+          <>
+            {/* End-of-song results */}
+            {showResults && (
+              <div className="fixed inset-0 z-50 bg-background/95 flex items-center justify-center p-4 animate-fade-in">
+                <button
+                  onClick={() => setShowResults(false)}
+                  aria-label="Close"
+                  className="absolute top-4 right-4 p-2 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
                 >
-                  <Save className="w-5 h-5 mr-2" />
-                  {isSaving ? 'Saving...' : 'Save Score'}
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+                  <X className="w-6 h-6" />
+                </button>
+                <div className="text-center max-w-md">
+                  {scoreBreakdown}
+
+                  {/* Guest name input -- only for anonymous users, lets them
+                      add their name to the leaderboard before score auto-saves */}
+                  {!user && scoreSaveStatus === 'idle' && (
+                    <div className="mb-4 flex items-center justify-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Enter your name"
+                        value={guestName}
+                        onChange={(e) => setGuestName(e.target.value)}
+                        onFocus={() => {
+                          // No racing the clock while actually typing --
+                          // once the field is engaged, cancel the pending
+                          // auto-save entirely. Saving becomes manual from
+                          // here (the "Submit Score" button below), so
+                          // there's no countdown pressure while composing
+                          // a name.
+                          if (autoSaveTimerRef.current) {
+                            clearTimeout(autoSaveTimerRef.current);
+                            autoSaveTimerRef.current = null;
+                          }
+                        }}
+                        maxLength={30}
+                        className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  )}
+
+                  {/* Explicit submit control -- visible until saving starts.
+                      The automatic timer (immediate for signed-in, 5s delay
+                      for anonymous) still runs in the background as a
+                      fallback for anyone who doesn't interact; clicking
+                      this just does it right away instead of waiting. */}
+                  {scoreSaveStatus === 'idle' && (
+                    <div className="mb-4">
+                      <Button
+                        onClick={handleManualSubmit}
+                        size="sm"
+                        className="gradient-primary text-primary-foreground"
+                      >
+                        Submit Score
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Auto-save status */}
+                  <div className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground min-h-[24px]">
+                    {scoreSaveStatus === 'saving' && (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Saving to leaderboard...
+                      </>
+                    )}
+                    {scoreSaveStatus === 'saved' && (
+                      <>
+                        <Check className="w-4 h-4 text-green-500" />
+                        Saved to leaderboard
+                      </>
+                    )}
+                    {scoreSaveStatus === 'failed' && (
+                      <>
+                        <span>Could not save score</span>
+                        <button
+                          onClick={submitScoreToLeaderboard}
+                          className="underline hover:text-foreground transition-colors"
+                        >
+                          Retry
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-4 justify-center">
+                    <Button variant="outline" size="lg" onClick={handleRestart}>
+                      <RotateCcw className="w-5 h-5 mr-2" />
+                      Try Again
+                    </Button>
+                    <Button variant="outline" size="lg" onClick={handleShareScore}>
+                      <Share2 className="w-5 h-5 mr-2" />
+                      Share
+                    </Button>
+                    <Button size="lg" className="gradient-primary text-primary-foreground" onClick={handleNextClick}>
+                      <Home className="w-5 h-5 mr-2" />
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Exit-confirm: back button pressed mid-performance */}
+            {showExitConfirm && (
+              <div className="fixed inset-0 z-50 bg-background/95 flex items-center justify-center p-4 animate-fade-in">
+                <div className="text-center max-w-md">
+                  <p className="text-lg text-muted-foreground mb-4">Here's how you're doing so far</p>
+                  {scoreBreakdown}
+                  <div className="flex gap-4 justify-center">
+                    <Button variant="outline" size="lg" onClick={handleKeepSinging}>
+                      Keep Singing
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="destructive"
+                      onClick={handleLeaveWithScoreCheck}
+                    >
+                      Leave
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Pause checkpoint: 30+ seconds sung since last checkpoint */}
+            {showPauseCheckpoint && (
+              <div className="fixed inset-0 z-50 bg-background/95 flex items-center justify-center p-4 animate-fade-in">
+                <div className="text-center max-w-md">
+                  <p className="text-lg font-semibold mb-4">{checkpointMessage}</p>
+                  {scoreBreakdown}
+                  <div className="flex gap-4 justify-center">
+                    <Button
+                      size="lg"
+                      className="gradient-primary text-primary-foreground"
+                      onClick={togglePlay}
+                    >
+                      <Play className="w-5 h-5 mr-2" />
+                      Continue
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {/* Lyrics Display */}
       <div className="flex-1 flex flex-col items-center justify-center px-4 py-6 md:p-8 overflow-hidden min-h-0">
@@ -998,12 +1536,25 @@ const Sing = () => {
                 const isPast = actualIndex < currentLineIndex;
 
                 const nextLine = lyrics[actualIndex + 1];
-                const effectiveDuration =
-                  line.duration && line.duration > 0
-                    ? line.duration
-                    : nextLine
-                      ? Math.max(0.25, nextLine.time - line.time)
-                      : Math.max(0.25, duration - line.time);
+                const lrcGapDuration = nextLine
+                  ? Math.max(0.25, nextLine.time - line.time)
+                  : Math.max(0.25, duration - line.time);
+
+                // If the vocal activity analysis has completed, use it to
+                // compute accurate singing duration for this line. The pink
+                // highlight finishes when the singer ACTUALLY stops singing,
+                // not at the next LRC timestamp (which could be 30+ seconds
+                // away across an instrumental break). Falls back to the
+                // LRC gap-based estimate if analysis hasn't completed yet
+                // or failed entirely.
+                const effectiveDuration = vocalIntervals
+                  ? getLineSingingDuration(
+                      line.time,
+                      nextLine?.time ?? null,
+                      vocalIntervals,
+                      lrcGapDuration,
+                    )
+                  : (line.duration && line.duration > 0 ? line.duration : lrcGapDuration);
 
                 const lineProgress = isCurrent
                   ? Math.min(1, Math.max(0, (currentTime - line.time) / effectiveDuration))
