@@ -57,6 +57,17 @@ interface Track {
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
+// Thrown when EVERY attempt to reach Saavn's API failed outright (network
+// error, timeout, non-2xx) -- distinct from a query that legitimately has
+// no matching songs. Lets the main handler respond with a clear "service
+// unavailable" message instead of a misleading empty result set.
+class SaavnUnavailableError extends Error {
+  constructor() {
+    super('Saavn API is currently unreachable');
+    this.name = 'SaavnUnavailableError';
+  }
+}
+
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -217,7 +228,15 @@ function timedFetch(url: string, ms = 5000): Promise<Response> {
 // Returns [] on any failure -- callers treat missing pages as "no more
 // results" rather than a hard error, so one bad page does not sink the
 // others fetched in parallel.
-async function fetchSaavnPage(query: string, page: number): Promise<any[]> {
+// Returns null specifically when the fetch/parse GENUINELY FAILED (network
+// error, timeout, non-2xx status, malformed response) -- distinct from []
+// which means the request SUCCEEDED but had zero results. This
+// distinction did not exist before and was the root cause of Saavn
+// outages being silently indistinguishable from "no results found": every
+// failure mode collapsed to [], so a total Saavn outage looked exactly
+// like a query with no matches, all the way up through a normal 200
+// response with an empty tracks array.
+async function fetchSaavnPage(query: string, page: number): Promise<any[] | null> {
   try {
     const url = `${SAAVN_API_BASE}/search/songs?query=${encodeURIComponent(query)}&page=${page}&limit=40`;
 
@@ -228,18 +247,79 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[]> {
     }
     if (!response.ok) {
       console.error(`Saavn error (page ${page}):`, response.status);
-      return [];
+      return null;
     }
 
     const data = await response.json();
     if (!data.success || !data.data?.results) {
       console.error(`Saavn: unexpected response shape (page ${page})`, JSON.stringify(data).slice(0, 200));
-      return [];
+      return null;
     }
     return data.data.results;
   } catch (err) {
     console.error(`Saavn page ${page} fetch error:`, err);
-    return [];
+    return null;
+  }
+}
+
+// Plan B: a self-hosted instance of a DIFFERENT open-source JioSaavn
+// scraper (cyberboysumanjay/JioSaavnAPI, Python/Flask) than the one the
+// primary SAAVN_API_BASE uses (sumitkolhe/jiosaavn-api, TypeScript).
+// Different implementation, SAME underlying source (JioSaavn) -- this
+// protects against "the primary wrapper's specific code/parsing broke"
+// but NOT against a genuine JioSaavn-wide outage, since both ultimately
+// depend on JioSaavn's own site being reachable and scrapable.
+//
+// Configured via the JIOSAAVN_FALLBACK_URL secret (Supabase edge function
+// env var) rather than hardcoded, since it points at a self-hosted
+// instance whose URL depends on where it's deployed. If that secret
+// isn't set, the fallback is silently skipped (returns null immediately)
+// rather than erroring -- makes this safe to ship before the fallback
+// instance is actually deployed and configured.
+async function fetchFromFallbackWrapper(query: string): Promise<Track[] | null> {
+  const fallbackBase = Deno.env.get('JIOSAAVN_FALLBACK_URL');
+  if (!fallbackBase) return null;
+
+  try {
+    const url = `${fallbackBase.replace(/\/$/, '')}/result/?query=${encodeURIComponent(query)}`;
+    const response = await timedFetch(url, 8000); // self-hosted free-tier instances can be slower, especially cold-starting
+    if (!response.ok) {
+      console.error('Fallback wrapper error:', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    // Defensive about the exact response shape -- could be a bare array,
+    // or wrapped under a common key, depending on the endpoint/version.
+    const rawList: any[] = Array.isArray(data) ? data
+      : Array.isArray(data?.results) ? data.results
+      : Array.isArray(data?.data) ? data.data
+      : [];
+
+    if (rawList.length === 0) return null;
+
+    return rawList
+      .filter((s: any) => s?.url) // must have a playable audio URL
+      .map((s: any) => {
+        const durationSecs = parseInt(s.duration, 10) || 0;
+        const year = typeof s.year === 'string' && /^\d{4}$/.test(s.year) ? parseInt(s.year, 10) : undefined;
+        return {
+          id: s.songid || s.e_songid || s.url,
+          title: decodeHtmlEntities(s.title || s.song || 'Unknown'),
+          artist: decodeHtmlEntities(s.singers || s.singer || 'Unknown Artist'),
+          thumbnail: s.image_url || '',
+          duration: formatDuration(durationSecs),
+          source: 'saavn' as const,
+          audioUrl: s.url,
+          album: decodeHtmlEntities(s.album || ''),
+          playCount: 0, // this wrapper doesn't expose play count
+          language: typeof s.language === 'string' ? s.language.toLowerCase() : undefined,
+          year,
+        };
+      });
+  } catch (err) {
+    console.error('Fallback wrapper fetch error:', err);
+    return null;
   }
 }
 
@@ -257,11 +337,30 @@ async function searchSaavn(query: string): Promise<Track[]> {
       Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
     );
 
+    // If EVERY page fetch failed (all null), this is a genuine outage --
+    // not a real "no results" response. Signal that upward by throwing a
+    // distinct, identifiable error rather than silently returning [],
+    // which is indistinguishable from a real zero-match search.
+    if (pageResults.every(p => p === null)) {
+      console.error('Primary Saavn source fully unreachable -- trying fallback wrapper');
+      const fallbackTracks = await fetchFromFallbackWrapper(query);
+      if (fallbackTracks && fallbackTracks.length > 0) {
+        console.log(`Fallback wrapper returned ${fallbackTracks.length} tracks`);
+        return fallbackTracks;
+      }
+      // Fallback either isn't configured, or also failed -- genuinely
+      // out of options, surface the outage.
+      throw new SaavnUnavailableError();
+    }
+
     // Merge and dedupe by song id (Saavn's pagination can occasionally
-    // overlap by a track or two at page boundaries).
+    // overlap by a track or two at page boundaries). Pages that failed
+    // (null) are simply skipped -- a partial outage (some pages succeed,
+    // some don't) still returns whatever real results came through.
     const seenIds = new Set<string>();
     const merged: any[] = [];
     for (const page of pageResults) {
+      if (!page) continue;
       for (const song of page) {
         if (song?.id && !seenIds.has(song.id)) {
           seenIds.add(song.id);
@@ -318,6 +417,7 @@ async function searchSaavn(query: string): Promise<Track[]> {
       };
     });
   } catch (err) {
+    if (err instanceof SaavnUnavailableError) throw err; // propagate, don't swallow
     console.error('Saavn search error:', err);
     return [];
   }
@@ -415,6 +515,16 @@ serve(async (req) => {
     );
 
   } catch (err: unknown) {
+    if (err instanceof SaavnUnavailableError) {
+      console.error('Saavn API is down -- returning 503');
+      return new Response(
+        JSON.stringify({
+          error: 'Music service is temporarily unavailable. Please try again in a few minutes.',
+          upstreamDown: true,
+        }),
+        { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     console.error('Search error:', msg);
     return new Response(
