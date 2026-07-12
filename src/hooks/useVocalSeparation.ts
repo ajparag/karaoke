@@ -133,7 +133,11 @@ const WARMUP_STALE_MS = 1 * 60 * 1000; // re-ping if >1 min since last warmup
 let lastWarmupTs = 0;
 let warmUpPromise: Promise<void> | null = null;
 
-const separationPromiseCache = new Map<string, Promise<SeparationResult | null>>();
+interface InFlightSeparation {
+  promise: Promise<SeparationResult | null>;
+  tier: SeparationTier;
+}
+const separationPromiseCache = new Map<string, InFlightSeparation>();
 
 export async function warmUpHFSpace(): Promise<void> {
   // Re-ping if warmup is stale (container may have gone cold after idle timeout)
@@ -187,6 +191,7 @@ export function useVocalSeparation() {
   const [progress, setProgress] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [separatedAudio, setSeparatedAudio] = useState<SeparationResult | null>(null);
+  const [activeTier, setActiveTier] = useState<SeparationTier>('fast');
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast'): Promise<SeparationResult | null> => {
@@ -209,19 +214,26 @@ export function useVocalSeparation() {
     // shared result, regardless of which tier or page triggered it.
     const existing = separationPromiseCache.get(audioUrl);
     if (existing) {
+      // Expose the ACTUAL tier already in flight, not the tier this
+      // particular caller happened to request -- e.g. Sing.tsx asks for
+      // 'fast' by default, but if it's attaching to Party Mode's
+      // already-running 'background' pre-separation, the wait screen
+      // needs to know it's really waiting on the slower T4 tier.
+      setActiveTier(existing.tier);
       setProgress('AI vocal separation in progress...');
-      const result = await existing;
+      const result = await existing.promise;
       if (result) setSeparatedAudio(result);
       setProgress('');
       setIsProcessing(false);
       return result;
     }
 
+    setActiveTier(tier);
     let resolveShared!: (value: SeparationResult | null) => void;
     const shared = new Promise<SeparationResult | null>((resolve) => {
       resolveShared = resolve;
     });
-    separationPromiseCache.set(audioUrl, shared);
+    separationPromiseCache.set(audioUrl, { promise: shared, tier });
     abortControllerRef.current = new AbortController();
 
     try {
@@ -311,7 +323,7 @@ export function useVocalSeparation() {
       resolveShared(null);
       return null;
     } finally {
-      if (separationPromiseCache.get(audioUrl) === shared) {
+      if (separationPromiseCache.get(audioUrl)?.promise === shared) {
         separationPromiseCache.delete(audioUrl);
       }
       abortControllerRef.current = null;
@@ -326,5 +338,5 @@ export function useVocalSeparation() {
     setSeparatedAudio(null);
   }, []);
 
-  return { isProcessing, progress, error, separatedAudio, separateVocals, reset };
+  return { isProcessing, progress, error, separatedAudio, separateVocals, reset, activeTier };
 }
