@@ -17,19 +17,39 @@ function inferContentType(url: string, fallback: string | null) {
   return fallback || "application/octet-stream";
 }
 
-async function requireUser(req: Request) {
+// Auth is OPTIONAL here, not required. This proxy is a CORS fallback used
+// by BOTH signed-in and anonymous singers (anonymous singing is a fully
+// supported, first-class use case throughout this app) -- it was
+// previously hard-requiring a signed-in session, which meant an anonymous
+// user whose direct CDN fetch failed had no working fallback at all,
+// right at the moment they needed one most.
+//
+// The real security boundary here is isAllowedAudioUrl() below (only
+// jiosaavn.com/saavncdn.com domains are proxyable) -- that's what
+// actually prevents this being abused as an open proxy, regardless of
+// auth state. Requiring sign-in on top of that domain allowlist added
+// friction without adding real protection.
+//
+// Also switched getClaims() -> getUser(): getClaims() is the same
+// unstable method that was already identified and fixed in submit-score
+// (see that function's changelog) after it caused 500 crashes -- this
+// function had the same latent bug, just never hit it as visibly.
+async function getUserIdIfPresent(req: Request): Promise<string | null> {
   const authHeader = req.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } }
-  );
-
-  const token = authHeader.replace("Bearer ", "");
-  const { data, error } = await supabase.auth.getClaims(token);
-  return error || !data?.claims ? null : data.claims.sub;
+  try {
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+    const { data } = await supabase.auth.getUser();
+    return data?.user?.id ?? null;
+  } catch (e) {
+    console.warn("[proxy-audio] Auth check failed (non-fatal, proceeding as anonymous):", e);
+    return null;
+  }
 }
 
 function isAllowedAudioUrl(audioUrl: string) {
@@ -50,13 +70,9 @@ serve(async (req) => {
   }
 
   try {
-    const userId = await requireUser(req);
-    if (!userId) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    // userId is informational only (logged below) -- NOT required to
+    // proceed. See getUserIdIfPresent()'s comment for why.
+    const userId = await getUserIdIfPresent(req);
 
     let audioUrl: string | null = null;
 
