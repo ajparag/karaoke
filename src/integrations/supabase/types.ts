@@ -98,6 +98,107 @@ export type Database = {
         }
         Relationships: []
       }
+      stages: {
+        Row: {
+          code: string
+          created_at: string
+          host_user_id: string
+          id: string
+          is_active: boolean
+          name: string
+        }
+        Insert: {
+          code: string
+          created_at?: string
+          host_user_id: string
+          id?: string
+          is_active?: boolean
+          name: string
+        }
+        Update: {
+          code?: string
+          created_at?: string
+          host_user_id?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+        }
+        Relationships: []
+      }
+      stage_queue: {
+        Row: {
+          album: string | null
+          audio_url: string
+          created_at: string
+          device_id: string
+          duration_seconds: number | null
+          id: string
+          instrumental_url: string | null
+          language: string | null
+          position: number
+          rating: string | null
+          score: number | null
+          singer_name: string
+          song_artist: string | null
+          song_title: string
+          stage_id: string
+          status: string
+          thumbnail_url: string | null
+          track_id: string
+          vocals_url: string | null
+        }
+        Insert: {
+          album?: string | null
+          audio_url: string
+          created_at?: string
+          device_id: string
+          duration_seconds?: number | null
+          id?: string
+          instrumental_url?: string | null
+          language?: string | null
+          position?: number
+          rating?: string | null
+          score?: number | null
+          singer_name: string
+          song_artist?: string | null
+          song_title: string
+          stage_id: string
+          status?: string
+          thumbnail_url?: string | null
+          track_id: string
+          vocals_url?: string | null
+        }
+        Update: {
+          album?: string | null
+          audio_url?: string
+          created_at?: string
+          device_id?: string
+          duration_seconds?: number | null
+          id?: string
+          instrumental_url?: string | null
+          language?: string | null
+          position?: number
+          rating?: string | null
+          score?: number | null
+          singer_name?: string
+          song_artist?: string | null
+          song_title?: string
+          stage_id?: string
+          status?: string
+          thumbnail_url?: string | null
+          track_id?: string
+          vocals_url?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "stage_queue_stage_id_fkey"
+            columns: ["stage_id"]
+            isOneToOne: false
+            referencedRelation: "stages"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
     }
     Views: {
       [_ in never]: never
