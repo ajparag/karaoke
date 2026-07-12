@@ -64,6 +64,11 @@ interface Track {
   language?: string; // "hindi", "punjabi", "english", etc. from Saavn
   releaseDate?: string; // "YYYY-MM-DD" from Saavn
   year?: number; // 4-digit release year -- more reliably populated than releaseDate
+  playCount?: number; // was missing -- code used track.playCount in multiple
+                        // places (trending sort, search result display) with
+                        // no type error ever surfacing, because the bare
+                        // `tsc --noEmit` check used all session wasn't
+                        // actually checking any files (see types.ts fix).
 }
 
 const Index = () => {
