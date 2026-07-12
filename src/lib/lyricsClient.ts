@@ -79,9 +79,9 @@ function plainToLyricLines(plain: string): LyricLine[] {
 
 // --- Script detection ---
 
-type Script = 'devanagari' | 'latin' | 'gurmukhi' | 'dual' | 'unknown';
+export type Script = 'devanagari' | 'latin' | 'gurmukhi' | 'dual' | 'unknown';
 
-function detectScript(text: string): Script {
+export function detectScript(text: string): Script {
   let deva = 0, latin = 0, gurmukhi = 0;
   for (const ch of text) {
     const code = ch.codePointAt(0) ?? 0;
@@ -102,7 +102,7 @@ function detectScript(text: string): Script {
   return 'unknown';
 }
 
-function scriptPenalty(script: Script, language?: string): number {
+export function scriptPenalty(script: Script, language?: string): number {
   const isHindi = (language || '').toLowerCase() === 'hindi';
   if (!isHindi) return 0;
   switch (script) {
@@ -122,7 +122,7 @@ const LRCLIB_HEADERS = { 'Lrclib-Client': 'KaraokeParty (https://karaokeparty.in
 // "(Original Motion Picture Soundtrack)", "- Single", punctuation and
 // casing differences, so "Swades" and "Swades (Original Motion Picture
 // Soundtrack)" are recognized as the same album.
-function normalizeAlbum(raw: string | undefined | null): string {
+export function normalizeAlbum(raw: string | undefined | null): string {
   if (!raw) return '';
   return raw
     .toLowerCase()
@@ -145,12 +145,12 @@ function normalizeAlbum(raw: string | undefined | null): string {
 // ("Murder 2"). The movie name inside the (From "...") suffix is almost
 // always more accurate for LRCLIB matching than Saavn's own album field.
 
-interface CleanedTrackInfo {
+export interface CleanedTrackInfo {
   cleanTitle: string;
   betterAlbum: string | undefined; // extracted from (From "..."), or original album
 }
 
-function cleanSaavnTitle(rawTitle: string, saavnAlbum?: string): CleanedTrackInfo {
+export function cleanSaavnTitle(rawTitle: string, saavnAlbum?: string): CleanedTrackInfo {
   // Match patterns like:
   //   (From "Murder 2")  (From 'Murder 2')  (From Murder 2)
   //   [From "Murder 2"]  - From "Murder 2"
@@ -204,7 +204,7 @@ interface RankedResult {
 const COVER_KEYWORDS = /\b(cover|remix|karaoke|instrumental|live|acoustic|unplugged|slowed|reverb|lofi|lo-fi|mashup|reprise|recreated)\b/i;
 const FEAT_PATTERN = /\(feat\..*?\)/i;
 
-function pickBestResult(
+export function pickBestResult(
   pool: any[],
   title: string,
   duration: number | undefined,
@@ -312,7 +312,7 @@ function pickBestResult(
 }
 
 // Generate all permutations of an array
-function permutations<T>(arr: T[]): T[][] {
+export function permutations<T>(arr: T[]): T[][] {
   if (arr.length <= 1) return [arr];
   const result: T[][] = [];
   for (let i = 0; i < arr.length; i++) {

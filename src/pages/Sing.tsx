@@ -87,6 +87,7 @@ const Sing = () => {
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [scoreSaveIsDuplicate, setScoreSaveIsDuplicate] = useState(false);
   const [guestName, setGuestName] = useState('');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
@@ -216,6 +217,8 @@ const Sing = () => {
   // Vocals volume control (0-100, default 30%)
   const [vocalsVolume, setVocalsVolume] = useState(40);
   const [vocalsEnabled, setVocalsEnabled] = useState(true);
+  const vocalsEnabledRef = useRef(vocalsEnabled);
+  useEffect(() => { vocalsEnabledRef.current = vocalsEnabled; }, [vocalsEnabled]);
 
   // Load track and pre-fetched lyrics from session storage
   useEffect(() => {
@@ -433,6 +436,27 @@ const Sing = () => {
     const onTimeUpdate = () => {
       if (!isMounted) return;
       setCurrentTime(audio.currentTime);
+
+      // Periodic drift correction between the instrumental (this element)
+      // and the separately-playing audible vocals element. These are two
+      // independent <audio> elements -- even started at the same position,
+      // their playback clocks aren't guaranteed to stay perfectly locked
+      // together (buffering/decode timing differences accumulate over a
+      // multi-minute song). This is also what fixes the "vocals off then
+      // back on" desync: toggling pauses the vocals element while the
+      // instrumental keeps advancing, and the one-time resync-on-toggle
+      // has its own play()-start latency that isn't otherwise corrected.
+      // Checked every timeupdate tick (~every 250ms) but only actually
+      // adjusted if the drift exceeds 200ms, so this doesn't cause
+      // audible micro-stutters correcting imperceptible differences.
+      const vocals = vocalsAudioRef.current;
+      if (vocals && vocalsEnabledRef.current && !vocals.paused && !audio.paused) {
+        const drift = Math.abs(vocals.currentTime - audio.currentTime);
+        if (drift > 0.2) {
+          vocals.currentTime = audio.currentTime;
+        }
+      }
+
       // End song at Saavn duration to avoid trailing silence from MDX padding.
       // Also catches cases where onEnded does not fire.
       const effectiveDur = trackDurationSecs > 0
@@ -1040,6 +1064,7 @@ const Sing = () => {
 
     setIsSaving(true);
     setScoreSaveStatus('saving');
+    setScoreSaveIsDuplicate(false);
     try {
       // Floored at 0 before submission -- the backend clamps timingAccuracy
       // to [0,100] anyway, but being explicit here keeps the stored value
@@ -1103,13 +1128,21 @@ const Sing = () => {
           console.warn('[Party] Failed to write score back to stage:', e);
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('[Leaderboard] Auto-save failed:', error);
+      // Duck-typed check for a 409 (duplicate submission, same song within
+      // the last 24h) -- FunctionsHttpError attaches the original Response
+      // to .context. Checking status directly rather than importing the
+      // error class, since it isn't cleanly re-exported from the main
+      // supabase-js package's public types.
+      if (error?.context?.status === 409) {
+        setScoreSaveIsDuplicate(true);
+      }
       setScoreSaveStatus('failed');
     } finally {
       setIsSaving(false);
     }
-  }, [track, user, totalScore, duration, currentTime]);
+  }, [track, user, guestName, totalScore, duration, currentTime]);
 
   // Trigger the auto-save exactly once when the song completes naturally.
   // For signed-in users: immediate. For anonymous (no user): delayed by
@@ -1426,7 +1459,10 @@ const Sing = () => {
                         Saved to leaderboard
                       </>
                     )}
-                    {scoreSaveStatus === 'failed' && (
+                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
+                      <span>Try the same song again after 24 hrs</span>
+                    )}
+                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
                       <>
                         <span>Could not save score</span>
                         <button
