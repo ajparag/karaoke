@@ -46,7 +46,7 @@ const TIPS: { icon: string; heading: string; body: string }[] = [
   {
     icon: "🎵",
     heading: "How pitch is scored",
-    body: "Pitch tracks how closely you match the original singer's notes. Hit the note within half a semitone and you score full marks for that phrase.",
+    body: "Pitch tracks how closely you match the original singer's notes. Land within a semitone and you're in great shape -- the closer to dead-on, the higher your score.",
   },
   {
     icon: "🥁",
