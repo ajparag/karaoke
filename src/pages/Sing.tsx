@@ -217,6 +217,8 @@ const Sing = () => {
   // Vocals volume control (0-100, default 30%)
   const [vocalsVolume, setVocalsVolume] = useState(40);
   const [vocalsEnabled, setVocalsEnabled] = useState(true);
+  const vocalsEnabledRef = useRef(vocalsEnabled);
+  useEffect(() => { vocalsEnabledRef.current = vocalsEnabled; }, [vocalsEnabled]);
 
   // Load track and pre-fetched lyrics from session storage
   useEffect(() => {
@@ -434,6 +436,27 @@ const Sing = () => {
     const onTimeUpdate = () => {
       if (!isMounted) return;
       setCurrentTime(audio.currentTime);
+
+      // Periodic drift correction between the instrumental (this element)
+      // and the separately-playing audible vocals element. These are two
+      // independent <audio> elements -- even started at the same position,
+      // their playback clocks aren't guaranteed to stay perfectly locked
+      // together (buffering/decode timing differences accumulate over a
+      // multi-minute song). This is also what fixes the "vocals off then
+      // back on" desync: toggling pauses the vocals element while the
+      // instrumental keeps advancing, and the one-time resync-on-toggle
+      // has its own play()-start latency that isn't otherwise corrected.
+      // Checked every timeupdate tick (~every 250ms) but only actually
+      // adjusted if the drift exceeds 200ms, so this doesn't cause
+      // audible micro-stutters correcting imperceptible differences.
+      const vocals = vocalsAudioRef.current;
+      if (vocals && vocalsEnabledRef.current && !vocals.paused && !audio.paused) {
+        const drift = Math.abs(vocals.currentTime - audio.currentTime);
+        if (drift > 0.2) {
+          vocals.currentTime = audio.currentTime;
+        }
+      }
+
       // End song at Saavn duration to avoid trailing silence from MDX padding.
       // Also catches cases where onEnded does not fire.
       const effectiveDur = trackDurationSecs > 0
