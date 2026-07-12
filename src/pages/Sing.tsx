@@ -33,6 +33,7 @@ import { analyzeVocalActivity, getLineSingingDuration, type VocalInterval } from
 import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
 import { saveCachedTracks } from "@/lib/audioCache";
 import { useWakeLock } from "@/hooks/useWakeLock";
+import { setAudioSessionType } from "@/lib/audioPermissions";
 
 interface Track {
   id: string;
@@ -165,9 +166,7 @@ const Sing = () => {
   // client-side web API can force Android's stream classification once
   // an AEC-tagged capture stream is active, on every device/OS version.
   useEffect(() => {
-    if ('audioSession' in navigator && (navigator as any).audioSession) {
-      try { (navigator as any).audioSession.type = 'play-and-record'; } catch {}
-    }
+    setAudioSessionType('play-and-record');
   }, []);
 
   // MediaSession API: the standard, OS-recognized way to declare active
@@ -339,14 +338,7 @@ const Sing = () => {
     // inaccurate declaration that the browser can (and likely does)
     // override once it sees an active AEC-enabled input stream. See the
     // longer explanation in the mount-effect silent-context setup above.
-    if ('audioSession' in navigator && (navigator as any).audioSession) {
-      try {
-        (navigator as any).audioSession.type = 'play-and-record';
-        console.log('[audio] Set audio session type to play-and-record');
-      } catch (e) {
-        console.log('[audio] Could not set audio session type:', e);
-      }
-    }
+    setAudioSessionType('play-and-record');
 
     const stopTimeSync = () => {
       if (timeSyncRafRef.current != null) {
