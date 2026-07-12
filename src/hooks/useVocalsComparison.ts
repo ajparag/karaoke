@@ -442,13 +442,26 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     source.connect(gain);
     gain.connect(analyser);
 
-    if (!userKeepAliveRef.current) {
-      userKeepAliveRef.current = ctx.createGain();
-      userKeepAliveRef.current.gain.value = 0.00001;
-    }
+    // FIXED: previously routed the user's OWN MIC INPUT through a
+    // "keepAlive" gain at 0.00001 into destination (speakers) -- same
+    // flawed pattern as the reference-vocals graph above, and carried a
+    // secondary risk of a faint feedback loop (mic picking up its own
+    // near-silent output from the speakers). Analyser data is read
+    // directly via JS, it doesn't need a destination connection at all.
+    // If a browser needs SOME active destination connection to keep this
+    // context's processing from being deprioritized, a dedicated silent
+    // oscillator (disconnected from any real signal) serves that purpose
+    // without ever routing the user's actual voice back out.
     try { analyser.disconnect(); } catch { /* ignore */ }
-    analyser.connect(userKeepAliveRef.current);
-    userKeepAliveRef.current.connect(ctx.destination);
+    if (!userKeepAliveRef.current) {
+      const keepAliveOsc = ctx.createOscillator();
+      const keepAliveGain = ctx.createGain();
+      keepAliveGain.gain.value = 0;
+      keepAliveOsc.connect(keepAliveGain);
+      keepAliveGain.connect(ctx.destination);
+      keepAliveOsc.start();
+      userKeepAliveRef.current = keepAliveGain;
+    }
 
     userSourceRef.current = source;
     userGainRef.current = gain;
@@ -626,18 +639,33 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
       analyser.smoothingTimeConstant = 0.5;
       refAnalyserRef.current = analyser;
 
-      // ANALYSIS-ONLY routing: source → analyser → keepAlive(~0) → destination.
-      // keepAlive is inaudible; it exists only so the graph stays "live" —
-      // some browsers deprioritise/stop processing audio graphs that don't
-      // ultimately connect to destination.
-      const keepAlive = ctx.createGain();
-      keepAlive.gain.value = 0.00001;
-      refKeepAliveRef.current = keepAlive;
+      // ANALYSIS-ONLY routing: source → analyser. The analyser does NOT
+      // connect onward to destination at all -- its data is read directly
+      // via getFloatTimeDomainData() in JS, it doesn't need a destination
+      // connection to keep receiving audio.
+      //
+      // FIXED: this used to route the actual reference vocals signal
+      // through a "keepAlive" gain node at 0.00001 (~-100dB) and INTO
+      // destination (speakers) -- not truly silent, just very quiet, and
+      // completely independent of Sing.tsx's own "Vocals On/Off" toggle
+      // (which only controls a separate audio element). Human hearing
+      // picks out vocal/speech content unusually well even at very low
+      // volumes, so this was an audible leak regardless of the toggle
+      // state. The dedicated keepAliveOsc below achieves the same
+      // "keep this AudioContext active" goal some browsers need, using a
+      // genuinely disconnected, silent oscillator that never carries any
+      // real signal -- zero chance of any vocals content reaching
+      // speakers at any gain, ever.
+      const keepAliveOsc = ctx.createOscillator();
+      const keepAliveGain = ctx.createGain();
+      keepAliveGain.gain.value = 0;
+      keepAliveOsc.connect(keepAliveGain);
+      keepAliveGain.connect(ctx.destination);
+      keepAliveOsc.start();
+      refKeepAliveRef.current = keepAliveGain;
 
       const source = ctx.createMediaElementSource(audio);
       source.connect(analyser);
-      analyser.connect(keepAlive);
-      keepAlive.connect(ctx.destination);
       refSourceRef.current = source;
 
       console.log('[REF] Reference graph connected successfully');
