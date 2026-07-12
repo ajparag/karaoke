@@ -150,14 +150,6 @@ export function scorePitchFrame(
 }
 
 /**
- * Apply miss-ratio penalty to the raw averaged pitch score.
- * missRatio in [0,1]; max 50% penalty when every reference frame is missed.
- */
-export function applyMissPenalty(rawPitch: number, missRatio: number): number {
-  return rawPitch * (1 - missRatio * 0.5);
-}
-
-/**
  * Greedy onset matcher used for the rhythm score.
  * Mirrors the in-hook implementation so we can verify it deterministically.
  */

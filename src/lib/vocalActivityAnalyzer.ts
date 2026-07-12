@@ -8,8 +8,14 @@
 // "time until the next LRC timestamp" which crawls in slow motion across
 // long instrumental gaps.
 //
-// Reuses the same RMS threshold (0.04) that useVocalsComparison uses for
-// its real-time referenceActive detection, so the two are consistent.
+// Uses a HIGHER RMS threshold (0.08) than useVocalsComparison's real-time
+// referenceActive detection (0.04) -- deliberately different, not a typo.
+// Real-time scoring needs sensitivity (better to catch a quiet vocal
+// passage than miss it); this offline highlight-timing pass needs
+// selectivity (filtering out MDX vocal-separation bleed -- residual
+// instrumental energy leaking into the vocals stem -- so highlights don't
+// stretch into instrumental sections). See the RMS_THRESHOLD constant
+// below for the full rationale.
 //
 // This runs ONCE per song, in the background, after the vocals stem URL
 // is available. It decodes the full audio buffer (~3-5MB for a typical
