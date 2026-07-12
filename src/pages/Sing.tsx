@@ -87,6 +87,7 @@ const Sing = () => {
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [scoreSaveIsDuplicate, setScoreSaveIsDuplicate] = useState(false);
   const [guestName, setGuestName] = useState('');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
@@ -1040,6 +1041,7 @@ const Sing = () => {
 
     setIsSaving(true);
     setScoreSaveStatus('saving');
+    setScoreSaveIsDuplicate(false);
     try {
       // Floored at 0 before submission -- the backend clamps timingAccuracy
       // to [0,100] anyway, but being explicit here keeps the stored value
@@ -1103,13 +1105,21 @@ const Sing = () => {
           console.warn('[Party] Failed to write score back to stage:', e);
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('[Leaderboard] Auto-save failed:', error);
+      // Duck-typed check for a 409 (duplicate submission, same song within
+      // the last 24h) -- FunctionsHttpError attaches the original Response
+      // to .context. Checking status directly rather than importing the
+      // error class, since it isn't cleanly re-exported from the main
+      // supabase-js package's public types.
+      if (error?.context?.status === 409) {
+        setScoreSaveIsDuplicate(true);
+      }
       setScoreSaveStatus('failed');
     } finally {
       setIsSaving(false);
     }
-  }, [track, user, totalScore, duration, currentTime]);
+  }, [track, user, guestName, totalScore, duration, currentTime]);
 
   // Trigger the auto-save exactly once when the song completes naturally.
   // For signed-in users: immediate. For anonymous (no user): delayed by
@@ -1426,7 +1436,10 @@ const Sing = () => {
                         Saved to leaderboard
                       </>
                     )}
-                    {scoreSaveStatus === 'failed' && (
+                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
+                      <span>Try the same song again after 24 hrs</span>
+                    )}
+                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
                       <>
                         <span>Could not save score</span>
                         <button
