@@ -198,6 +198,7 @@ const Sing = () => {
     progress: cacheProgress,
     separatedAudio,
     separateVocals: loadFromCache,
+    activeTier,
   } = useVocalSeparation();
 
   // Vocals comparison hook - compares user singing with AI-separated vocals
@@ -1305,12 +1306,18 @@ const Sing = () => {
         </div>
       </header>
 
-      {/* Separation Wait Screen */}
+      {/* Separation Wait Screen -- estimate reflects the ACTUAL tier doing
+          the work (activeTier), not just what this page nominally
+          requested. Sing.tsx always asks for 'fast', but the dedup
+          system may attach it to an already-in-flight 'background' (T4)
+          job from Party Mode's pre-separation -- in that case the real
+          wait is meaningfully longer, and the estimate should reflect
+          that instead of understating it. */}
       <SeparationWaitScreen
         track={track}
         isVisible={!separatedAudio && !!track}
         startedAt={separationStartedAt}
-        estimatedSeconds={35}
+        estimatedSeconds={activeTier === 'background' ? 50 : 30}
       />
 
       {/* Shared score breakdown -- used by end-of-song results, exit-confirm,
