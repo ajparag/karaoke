@@ -159,7 +159,7 @@ serve(async (req) => {
       const { data: existing, error: existingError } = await dedupeQuery;
       if (existingError) throw existingError;
       if (existing && existing.length > 0) {
-        return json({ error: "You already submitted a score for this song in the last 24 hours" }, 409);
+        return json({ error: "Try the same song again after 24 hrs" }, 409);
       }
     }
 
