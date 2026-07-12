@@ -7,7 +7,6 @@ import { HashRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import { ThemeProvider } from "@/hooks/useTheme";
 import { AuthCallbackGate } from "@/components/AuthCallbackGate";
-import { useEffect } from "react";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import Sing from "./pages/Sing";
