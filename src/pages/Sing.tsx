@@ -2,10 +2,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-
-} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,7 +15,6 @@ import {
 import { ArrowLeft, Play, Pause, Mic, MicOff, RotateCcw, Volume2, VolumeX, Search, Check, Loader2, Share2, X, Home } from "lucide-react";
 import { SeparationWaitScreen } from "@/components/SeparationWaitScreen";
 import { VocalsIcon } from "@/components/icons/VocalsIcon";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalsComparison } from "@/hooks/useVocalsComparison";

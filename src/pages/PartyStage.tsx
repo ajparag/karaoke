@@ -305,17 +305,19 @@ export default function PartyStage() {
   return (
     <div className="min-h-screen bg-background">
       <header className="glass border-b border-border p-4 sticky top-0 z-50">
-        <div className="max-w-3xl mx-auto flex items-center gap-4">
-          <Link to="/">
-            <Button variant="ghost" size="icon"><ArrowLeft className="w-5 h-5" /></Button>
-          </Link>
-          <div className="flex-1">
+        <div className="max-w-3xl mx-auto flex items-center gap-3">
+          <div className="flex-1 min-w-0">
             <h1 className="font-semibold text-xl flex items-center gap-2">
-              <PartyPopper className="w-5 h-5 text-primary" /> {stageName}
+              <PartyPopper className="w-5 h-5 text-primary shrink-0" /> <span className="truncate">{stageName}</span>
             </h1>
             <p className="text-sm text-muted-foreground">You're hosting -- only you can play songs</p>
           </div>
-          <Button variant="outline" size="sm" onClick={handleEndParty}>End Party</Button>
+          <Link to="/">
+            <Button variant="ghost" size="sm" className="shrink-0 gap-1" title="Leave this screen -- party stays active, come back anytime with the code">
+              <ArrowLeft className="w-4 h-4" /> Home
+            </Button>
+          </Link>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={handleEndParty}>End Party</Button>
         </div>
       </header>
 

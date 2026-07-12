@@ -153,7 +153,7 @@ export default function Auth() {
       });
     } else {
       toast({
-        title: 'Welcome to VoiceScore!',
+        title: 'Welcome to KaraokeParty!',
         description: 'Your account has been created.',
       });
     }

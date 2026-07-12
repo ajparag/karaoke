@@ -82,7 +82,11 @@ export default function JoinParty() {
               onChange={(e) => setCode(e.target.value.toUpperCase())}
               maxLength={4}
               className="text-center text-2xl tracking-[0.3em] font-semibold h-14"
-              onKeyDown={(e) => e.key === "Enter" && (user ? handleJoin() : undefined)}
+              onKeyDown={(e) => e.key === "Enter" && handleJoin()}
+              // Was: only submitted on Enter if signed in -- anonymous users
+              // pressing Enter here got silent, confusing nothing. handleJoin()
+              // already validates and shows a toast if the name is missing, so
+              // just always attempting it is simpler and gives real feedback.
             />
             {!user && (
               <Input

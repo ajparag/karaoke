@@ -25,7 +25,6 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Music, Trophy, Loader2, Play, Search, LogOut, User, Sun, Moon, PartyPopper, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -82,7 +81,6 @@ const Index = () => {
 
   // AI vocal separation (starts in background when track is selected)
   const { isProcessing: isSeparating, progress: separationProgress, separatedAudio, separateVocals, reset: resetSeparation } = useVocalSeparation();
-  const separationStartedRef = useRef(false);
 
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -95,8 +93,11 @@ const Index = () => {
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const pendingConfirmLeaveRef = useRef<(() => void) | null>(null);
-  const separationStartedAtRef = useRef<number | null>(null);
-  const [separationStartedAt, setSeparationStartedAt] = useState<number | null>(null);
+  // NOTE: separation-timing state (start ref/timestamp) was removed here --
+  // Index.tsx doesn't render a wait screen (that moved to Sing.tsx per the
+  // v2 architecture change at the top of this file), so this state was
+  // declared but never actually read or set anywhere. Dead leftover from
+  // an earlier version of this page.
 
   // Back button guard: confirm before leaving if separation is in progress
   useBackGuard((confirmLeave) => {
