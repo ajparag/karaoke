@@ -19,9 +19,6 @@ verify_jwt = false
 [functions.search-music]
 verify_jwt = false
 
-[functions.fetch-lyrics]
-verify_jwt = false
-
 [functions.separate-vocals]
 verify_jwt = false
 
