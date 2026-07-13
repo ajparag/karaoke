@@ -298,21 +298,35 @@ async function fetchFromFallbackWrapper(query: string): Promise<Track[] | null> 
 
     if (rawList.length === 0) return null;
 
+    // Field mapping below is based on a REAL response from the deployed
+    // instance, not documentation examples -- several assumed field names
+    // were wrong on the first pass (there is no "url", "songid", or
+    // "image_url" field at all; the real ones are "media_url", "id", and
+    // "image"). Corrected after manually verifying media_url actually
+    // plays a full song despite the response also carrying "is_drm": 1
+    // and "disabled_text": "Pro Only" flags -- those flags are present on
+    // every track including ones confirmed to play fine, so they're not
+    // reliably enforced on this endpoint and are deliberately ignored
+    // here rather than used as a filter (filtering on them would wrongly
+    // reject tracks that actually work).
     return rawList
-      .filter((s: any) => s?.url) // must have a playable audio URL
+      .filter((s: any) => s?.media_url) // must have a playable audio URL
       .map((s: any) => {
         const durationSecs = parseInt(s.duration, 10) || 0;
         const year = typeof s.year === 'string' && /^\d{4}$/.test(s.year) ? parseInt(s.year, 10) : undefined;
+        // "singers" can be an empty string (seen in real responses) --
+        // fall back to primary_artists when that happens.
+        const artistName = (s.singers && s.singers.trim()) || s.primary_artists || 'Unknown Artist';
         return {
-          id: s.songid || s.e_songid || s.url,
-          title: decodeHtmlEntities(s.title || s.song || 'Unknown'),
-          artist: decodeHtmlEntities(s.singers || s.singer || 'Unknown Artist'),
-          thumbnail: s.image_url || '',
+          id: s.id || s.media_url,
+          title: decodeHtmlEntities(s.song || s.title || 'Unknown'),
+          artist: decodeHtmlEntities(artistName),
+          thumbnail: s.image || '',
           duration: formatDuration(durationSecs),
           source: 'saavn' as const,
-          audioUrl: s.url,
+          audioUrl: s.media_url,
           album: decodeHtmlEntities(s.album || ''),
-          playCount: 0, // this wrapper doesn't expose play count
+          playCount: typeof s.play_count === 'number' ? s.play_count : 0,
           language: typeof s.language === 'string' ? s.language.toLowerCase() : undefined,
           year,
         };
