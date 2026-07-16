@@ -1499,6 +1499,64 @@ const Sing = () => {
                 <div className="text-center max-w-md">
                   <p className="text-lg text-muted-foreground mb-4">Here's how you're doing so far</p>
                   {scoreBreakdown}
+
+                  {/* Guest name input before submitting */}
+                  {!user && scoreSaveStatus === 'idle' && (
+                    <div className="mb-4 flex items-center justify-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Enter your name (optional)"
+                        value={guestName}
+                        onChange={(e) => setGuestName(e.target.value)}
+                        maxLength={30}
+                        className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  )}
+
+                  {/* Submit score button */}
+                  {scoreSaveStatus === 'idle' && (
+                    <div className="mb-4">
+                      <Button
+                        onClick={handleManualSubmit}
+                        size="sm"
+                        className="gradient-primary text-primary-foreground"
+                      >
+                        Submit Score
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Save status feedback */}
+                  <div className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground min-h-[24px]">
+                    {scoreSaveStatus === 'saving' && (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Saving to leaderboard...
+                      </>
+                    )}
+                    {scoreSaveStatus === 'saved' && (
+                      <>
+                        <Check className="w-4 h-4 text-green-500" />
+                        Saved to leaderboard
+                      </>
+                    )}
+                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
+                      <span>Try the same song again after 24 hrs</span>
+                    )}
+                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
+                      <>
+                        <span>Could not save score</span>
+                        <button
+                          onClick={submitScoreToLeaderboard}
+                          className="underline hover:text-foreground transition-colors"
+                        >
+                          Retry
+                        </button>
+                      </>
+                    )}
+                  </div>
+
                   <div className="flex gap-4 justify-center">
                     <Button variant="outline" size="lg" onClick={handleKeepSinging}>
                       Keep Singing
@@ -1521,6 +1579,64 @@ const Sing = () => {
                 <div className="text-center max-w-md">
                   <p className="text-lg font-semibold mb-4">{checkpointMessage}</p>
                   {scoreBreakdown}
+
+                  {/* Guest name input before submitting */}
+                  {!user && scoreSaveStatus === 'idle' && (
+                    <div className="mb-4 flex items-center justify-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Enter your name (optional)"
+                        value={guestName}
+                        onChange={(e) => setGuestName(e.target.value)}
+                        maxLength={30}
+                        className="px-3 py-2 rounded-lg bg-muted text-foreground text-sm w-48 text-center placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  )}
+
+                  {/* Submit score button */}
+                  {scoreSaveStatus === 'idle' && (
+                    <div className="mb-4">
+                      <Button
+                        onClick={handleManualSubmit}
+                        size="sm"
+                        className="gradient-primary text-primary-foreground"
+                      >
+                        Submit Score
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Save status feedback */}
+                  <div className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground min-h-[24px]">
+                    {scoreSaveStatus === 'saving' && (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Saving to leaderboard...
+                      </>
+                    )}
+                    {scoreSaveStatus === 'saved' && (
+                      <>
+                        <Check className="w-4 h-4 text-green-500" />
+                        Saved to leaderboard
+                      </>
+                    )}
+                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
+                      <span>Try the same song again after 24 hrs</span>
+                    )}
+                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
+                      <>
+                        <span>Could not save score</span>
+                        <button
+                          onClick={submitScoreToLeaderboard}
+                          className="underline hover:text-foreground transition-colors"
+                        >
+                          Retry
+                        </button>
+                      </>
+                    )}
+                  </div>
+
                   <div className="flex gap-4 justify-center">
                     <Button
                       size="lg"
