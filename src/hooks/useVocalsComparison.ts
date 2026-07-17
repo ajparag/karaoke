@@ -139,6 +139,8 @@ import {
   SILENCE_RMS,
   ONSET_WINDOW_MS,
 } from '@/lib/vocalScoring';
+// NOTE: REF_PARTIAL_CREDIT_NO_USERPITCH removed — amateur singers are loud;
+// a pitchless signal above the voice threshold is noise, not soft singing.
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -176,7 +178,7 @@ const HISTORY_FRAMES = 60;
 const REF_VOCAL_THRESHOLD = 0.04; // higher than SILENCE_RMS (0.015) to ignore residual bleed in vocal stem          // ~1s of history at 60fps for technique scoring
 const SCORE_SMOOTHING = 0.12;       // EMA smoothing factor for displayed scores
 const REF_PARTIAL_CREDIT_NO_REFPITCH = 40;
-const REF_PARTIAL_CREDIT_NO_USERPITCH = 15;
+
 const ONSET_DEBOUNCE_MS = 100;
 const REF_BUFFER_TIMEOUT_MS = 4000;       // soft checkpoint — logs a warning, does not give up
 const REF_BUFFER_HARD_TIMEOUT_MS = 15000; // hard ceiling — actually gives up here
@@ -967,23 +969,15 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
             // Partial credit — we can't verify accuracy, but presence counts.
             pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_REFPITCH;
           } else if (userPitch === 0) {
-            // User is vocalising (volume above threshold) but their pitch
-            // wasn't cleanly detected — breathy or soft singing. Amateur-
-            // friendly partial credit rather than treating this as a miss.
-            //
-            // EXTRA GATE: only award partial credit if the user's volume is
-            // meaningfully above the voice threshold (3x), not just barely
-            // over it. This prevents ambient noise that squeaks past the
-            // threshold from farming partial credit across an entire song.
-            // A real soft singer will be clearly above 3x threshold; room
-            // noise that barely crossed it won't.
-            if (userVolume > voiceThreshold * 3) {
-              pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_USERPITCH;
-            } else {
-              // Treat as a miss — signal too weak to be actual vocalisation
-              missedFramesRef.current++;
-              pitchScoreAccRef.current += -50;
-            }
+            // User volume crossed the voice threshold but pitch detection
+            // returned 0 — no detectable harmonic structure in the signal.
+            // For an amateur singer (this app's target audience), if they
+            // are singing loudly enough to clear 10x noise floor, pitch
+            // detection should succeed. A pitchless signal at that volume
+            // is almost certainly noise, not vocalisation.
+            // Treat as a miss — same penalty as silence during active vocals.
+            missedFramesRef.current++;
+            pitchScoreAccRef.current += -50;
           }
         }
 
