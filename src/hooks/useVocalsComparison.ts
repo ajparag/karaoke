@@ -176,7 +176,7 @@ const HISTORY_FRAMES = 60;
 const REF_VOCAL_THRESHOLD = 0.04; // higher than SILENCE_RMS (0.015) to ignore residual bleed in vocal stem          // ~1s of history at 60fps for technique scoring
 const SCORE_SMOOTHING = 0.12;       // EMA smoothing factor for displayed scores
 const REF_PARTIAL_CREDIT_NO_REFPITCH = 40;
-const REF_PARTIAL_CREDIT_NO_USERPITCH = 25;
+const REF_PARTIAL_CREDIT_NO_USERPITCH = 15;
 const ONSET_DEBOUNCE_MS = 100;
 const REF_BUFFER_TIMEOUT_MS = 4000;       // soft checkpoint — logs a warning, does not give up
 const REF_BUFFER_HARD_TIMEOUT_MS = 15000; // hard ceiling — actually gives up here
@@ -857,7 +857,13 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
           const candidate = userVolume < 0.03 ? userVolume : nf;
           noiseFloorRef.current = nf * 0.98 + candidate * 0.02;
         }
-        const voiceThreshold = Math.max(0.005, noiseFloorRef.current * 4);
+        // Threshold tightened in two steps:
+        // Step 1 (prev): 4x → 8x multiplier, floor 0.005 → 0.012
+        // Step 2 (this): 8x → 10x multiplier, floor 0.012 → 0.018
+        // Ambient noise typically sits at 1-3x noise floor; 10x requires
+        // a signal clearly above background, consistent with vocalisation.
+        // Floor raised to 0.018 to handle near-zero noise floor at song start.
+        const voiceThreshold = Math.max(0.018, noiseFloorRef.current * 10);
         const isVoiceDetected = userVolume > voiceThreshold;
         const userPitch = detectPitchAC(timeFloat, userAudioCtxRef.current.sampleRate);
 
@@ -964,7 +970,20 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
             // User is vocalising (volume above threshold) but their pitch
             // wasn't cleanly detected — breathy or soft singing. Amateur-
             // friendly partial credit rather than treating this as a miss.
-            pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_USERPITCH;
+            //
+            // EXTRA GATE: only award partial credit if the user's volume is
+            // meaningfully above the voice threshold (3x), not just barely
+            // over it. This prevents ambient noise that squeaks past the
+            // threshold from farming partial credit across an entire song.
+            // A real soft singer will be clearly above 3x threshold; room
+            // noise that barely crossed it won't.
+            if (userVolume > voiceThreshold * 3) {
+              pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_USERPITCH;
+            } else {
+              // Treat as a miss — signal too weak to be actual vocalisation
+              missedFramesRef.current++;
+              pitchScoreAccRef.current += -50;
+            }
           }
         }
 
