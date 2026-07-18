@@ -1271,59 +1271,27 @@ const Sing = () => {
         />
       ) : null}
       {/* Header */}
-      <header className="glass border-b border-border p-2 md:p-4 flex items-center gap-2 md:gap-4 shrink-0">
+      <header className="glass border-b border-border px-3 py-2 flex items-center gap-2 shrink-0">
         <Button variant="ghost" size="icon" onClick={() => handleBackAttempt(() => navigate('/'))}>
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <div className="flex-1 min-w-0">
-          <h1 className="font-semibold truncate">{track?.title || 'Loading...'}</h1>
-          <p className="text-sm text-muted-foreground truncate">{track?.artist}</p>
+          <h1 className="font-semibold text-sm truncate">{track?.title || 'Loading...'}</h1>
+          <p className="text-xs text-muted-foreground truncate">{track?.artist}</p>
         </div>
-        
-        {/* Edit Lyrics Search Button */}
-
-
-        {/* Vocals Volume Control - only show when separation is complete */}
+        {/* Vocals toggle pill — always visible in header, slider moves to bottom panel */}
         {separatedAudio && (
-          <div className="flex items-center gap-2">
-            <Button 
-              variant={vocalsEnabled ? "default" : "outline"} 
-              size="sm"
-              onClick={toggleVocals}
-              className={`shrink-0 gap-1.5 ${vocalsEnabled ? 'bg-primary hover:bg-primary/90' : ''}`}
-              title={vocalsEnabled ? `Vocals at ${vocalsVolume}%` : 'Enable vocals'}
-            >
-              <VocalsIcon className="w-4 h-4" isActive={vocalsEnabled} />
-              <span className="hidden sm:inline">
-                {vocalsEnabled ? 'Vocals' : 'Vocals Off'}
-              </span>
-            </Button>
-            {vocalsEnabled && (
-              <Slider
-                value={[vocalsVolume]}
-                onValueChange={(v) => setVocalsVolume(v[0])}
-                max={100}
-                min={0}
-                step={5}
-                className="w-20 sm:w-24"
-              />
-            )}
-          </div>
-        )}
-        
-        {/* Volume Control */}
-        <div className="hidden sm:flex items-center gap-2">
-          <Button variant="ghost" size="icon" onClick={toggleMute}>
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          <Button
+            variant={vocalsEnabled ? "default" : "outline"}
+            size="sm"
+            onClick={toggleVocals}
+            className={`shrink-0 text-xs h-7 px-3 rounded-full ${vocalsEnabled ? 'bg-primary hover:bg-primary/90' : ''}`}
+            title={vocalsEnabled ? `Vocals at ${vocalsVolume}%` : 'Enable vocals'}
+          >
+            <VocalsIcon className="w-3 h-3 mr-1" isActive={vocalsEnabled} />
+            {vocalsEnabled ? `${vocalsVolume}%` : 'Off'}
           </Button>
-          <Slider
-            value={[isMuted ? 0 : volume]}
-            onValueChange={handleVolumeChange}
-            max={100}
-            step={1}
-            className="w-24"
-          />
-        </div>
+        )}
       </header>
 
       {/* Separation Wait Screen -- estimate reflects the ACTUAL tier doing
@@ -1357,7 +1325,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.pitch / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Pitch <span className="text-primary/70">(33%)</span></p>
+                <p className="text-xs text-muted-foreground">Accuracy <span className="text-primary/70">(50%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
@@ -1365,7 +1333,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.rhythm / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Rhythm <span className="text-primary/70">(33%)</span></p>
+                <p className="text-xs text-muted-foreground">Flow <span className="text-primary/70">(25%)</span></p>
               </div>
               <div className="text-center p-3 bg-muted/30 rounded-lg">
                 <p className="text-xl font-semibold">
@@ -1373,7 +1341,7 @@ const Sing = () => {
                     ? Math.round(scoreAccumulatorRef.current.technique / scoreAccumulatorRef.current.count)
                     : 0}%
                 </p>
-                <p className="text-xs text-muted-foreground">Technique <span className="text-primary/70">(33%)</span></p>
+                <p className="text-xs text-muted-foreground">Expression <span className="text-primary/70">(25%)</span></p>
               </div>
             </div>
           </>
@@ -1747,73 +1715,57 @@ const Sing = () => {
           </div>
       </div>
 
-      {/* Score Display */}
-      <div className="glass border-t border-border px-4 pt-3 pb-2 md:px-6 md:pt-4 md:pb-3 shrink-0">
-        {/* Score row: number left, metrics center, rating right */}
-        <div className="flex items-end justify-between mb-3 max-w-4xl mx-auto">
-          <div className="flex items-baseline gap-2">
-            <p className="text-5xl md:text-6xl font-bold text-gradient-gold leading-none">{totalScore}</p>
-            <p className="text-sm text-muted-foreground mb-1">Score</p>
-          </div>
+      {/* Score + Controls Panel */}
+      <div className="glass border-t border-border px-4 pt-3 pb-3 shrink-0">
 
-          {/* Live Metrics */}
-          {isMicActive && (
-            <div className="flex items-end gap-3">
-              <div className="text-center">
-                <div className={`h-1 w-10 rounded-full ${getScoreColor(metrics.pitchMatch)}`} />
-                <p className="text-[10px] text-muted-foreground mt-1">Pitch</p>
+        {/* Score row: metrics left — score centre — rating right */}
+        <div className="flex items-end justify-between mb-3 max-w-4xl mx-auto">
+
+          {/* Live metric percentages — left column */}
+          {isMicActive ? (
+            <div className="flex flex-col gap-1 min-w-[56px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-muted-foreground">Acc</span>
+                <span className="text-xs font-semibold text-blue-500">
+                  {metrics.pitchMatch}%
+                </span>
               </div>
-              <div className="text-center">
-                <div className={`h-1 w-10 rounded-full ${getScoreColor(metrics.rhythmMatch)}`} />
-                <p className="text-[10px] text-muted-foreground mt-1">Rhythm</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-muted-foreground">Flow</span>
+                <span className="text-xs font-semibold text-green-500">
+                  {metrics.rhythmMatch}%
+                </span>
               </div>
-              <div className="text-center">
-                <div className={`h-1 w-10 rounded-full ${getScoreColor(metrics.techniqueMatch)}`} />
-                <p className="text-[10px] text-muted-foreground mt-1">Tech</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-muted-foreground">Expr</span>
+                <span className="text-xs font-semibold text-purple-500">
+                  {metrics.techniqueMatch}%
+                </span>
               </div>
             </div>
+          ) : (
+            <div className="min-w-[56px]" />
           )}
 
-          <div className={`text-5xl md:text-6xl font-bold leading-none ${rating.color}`}>
+          {/* Score — hero element */}
+          <p className="text-6xl md:text-7xl font-bold text-gradient-gold leading-none text-center">
+            {totalScore}
+          </p>
+
+          {/* Rating letter — right */}
+          <div className={`text-5xl md:text-6xl font-bold leading-none min-w-[40px] text-right ${rating.color}`}>
             {rating.letter}
           </div>
         </div>
 
-        {/* Controls: Mic — Play — Redo, full width */}
-        <div className="flex items-center justify-between max-w-4xl mx-auto mb-3">
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={toggleMic}
-            className={`w-12 h-12 md:w-14 md:h-14 rounded-full ${isMicActive ? 'bg-primary text-primary-foreground border-primary' : ''}`}
-          >
-            {isMicActive ? <Mic className="w-5 h-5 md:w-6 md:h-6" /> : <MicOff className="w-5 h-5 md:w-6 md:h-6" />}
-          </Button>
-
-          <Button
-            size="lg"
-            onClick={togglePlay}
-            disabled={!isPlayerReady || isLoadingFromCache || !separatedAudio}
-            className="gradient-primary text-primary-foreground w-16 h-16 md:w-20 md:h-20 rounded-full disabled:opacity-50 shadow-lg"
-            title={!separatedAudio ? 'Waiting for AI separation...' : isPlaying ? 'Pause' : 'Play'}
-          >
-            {isLoadingFromCache ? <Loader2 className="w-7 h-7 md:w-9 md:h-9 animate-spin" /> : isPlaying ? <Pause className="w-7 h-7 md:w-9 md:h-9" /> : <Play className="w-7 h-7 md:w-9 md:h-9 ml-0.5" />}
-          </Button>
-
-          <Button variant="outline" size="icon" onClick={handleRestart} className="w-12 h-12 md:w-14 md:h-14 rounded-full">
-            <RotateCcw className="w-5 h-5 md:w-6 md:h-6" />
-          </Button>
-        </div>
-
-        {/* Progress Bar */}
-        <div className="max-w-4xl 3xl:max-w-6xl 4xl:max-w-7xl mx-auto mt-2 md:mt-4 3xl:mt-6">
+        {/* Progress bar */}
+        <div className="max-w-4xl mx-auto mb-3">
           <div
-            className="h-1 3xl:h-2 4xl:h-3 bg-muted rounded-full cursor-pointer"
+            className="h-1 bg-muted rounded-full cursor-pointer"
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               const percent = (e.clientX - rect.left) / rect.width;
-              const newTime = percent * duration;
-              handleSeek(newTime);
+              handleSeek(percent * duration);
             }}
           >
             <div
@@ -1821,11 +1773,79 @@ const Sing = () => {
               style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
             />
           </div>
-          <div className="flex justify-between text-[10px] md:text-xs 3xl:text-sm 4xl:text-base text-muted-foreground mt-0.5 md:mt-1">
+          <div className="flex justify-between text-[10px] text-muted-foreground mt-0.5">
             <span>{formatDuration(currentTime)}</span>
             <span>{formatDuration(duration)}</span>
           </div>
         </div>
+
+        {/* Controls: Mic — Play — Redo */}
+        <div className="flex items-center justify-between max-w-4xl mx-auto mb-3">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={toggleMic}
+            className={`w-12 h-12 rounded-full ${isMicActive ? 'bg-primary text-primary-foreground border-primary' : ''}`}
+          >
+            {isMicActive ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+          </Button>
+
+          <Button
+            size="lg"
+            onClick={togglePlay}
+            disabled={!isPlayerReady || isLoadingFromCache || !separatedAudio}
+            className="gradient-primary text-primary-foreground w-16 h-16 rounded-full disabled:opacity-50 shadow-lg"
+            title={!separatedAudio ? 'Waiting for AI separation...' : isPlaying ? 'Pause' : 'Play'}
+          >
+            {isLoadingFromCache
+              ? <Loader2 className="w-7 h-7 animate-spin" />
+              : isPlaying
+                ? <Pause className="w-7 h-7" />
+                : <Play className="w-7 h-7 ml-0.5" />}
+          </Button>
+
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handleRestart}
+            className="w-12 h-12 rounded-full"
+          >
+            <RotateCcw className="w-5 h-5" />
+          </Button>
+        </div>
+
+        {/* Vocals volume slider — always visible when separation is done */}
+        {separatedAudio && (
+          <div className="flex items-center gap-3 max-w-4xl mx-auto">
+            <button
+              onClick={toggleVocals}
+              className="shrink-0"
+              title={vocalsEnabled ? 'Disable vocals' : 'Enable vocals'}
+            >
+              <VocalsIcon
+                className={`w-4 h-4 ${vocalsEnabled ? 'text-primary' : 'text-muted-foreground'}`}
+                isActive={vocalsEnabled}
+              />
+            </button>
+            <Slider
+              value={[vocalsEnabled ? vocalsVolume : 0]}
+              onValueChange={(v) => {
+                setVocalsVolume(v[0]);
+                if (v[0] > 0 && !vocalsEnabled) toggleVocals();
+                if (v[0] === 0 && vocalsEnabled) toggleVocals();
+              }}
+              max={100}
+              min={0}
+              step={5}
+              className="flex-1"
+              disabled={false}
+            />
+            <span className="text-[10px] text-muted-foreground w-7 text-right shrink-0">
+              {vocalsEnabled ? `${vocalsVolume}%` : 'Off'}
+            </span>
+            <span className="text-[10px] text-muted-foreground shrink-0">Vocals</span>
+          </div>
+        )}
       </div>
     </div>
   );
