@@ -174,13 +174,11 @@ export async function warmUpHFSpace(): Promise<void> {
   return warmUpPromise;
 }
 
-// Kept as export for backward compatibility with Index.tsx imports.
-// No-op in streaming mode -- Modal downloads from Saavn CDN directly.
-// The old version downloaded 4-5MB to the browser just to throw it away.
-export async function prefetchAudio(_audioUrl: string): Promise<void> {
-  // Trigger warmup if stale (the only useful side-effect of the old prefetch)
-  warmUpHFSpace();
-}
+// warmUpModal is the canonical name going forward.
+// warmUpHFSpace kept as an alias for backward compatibility — both point to
+// the same function. Rename callers to warmUpModal at your convenience;
+// warmUpHFSpace will be removed in a future cleanup pass.
+export const warmUpModal = warmUpHFSpace;
 
 // =============================================================================
 // SEPARATION HOOK
@@ -194,7 +192,11 @@ export function useVocalSeparation() {
   const [activeTier, setActiveTier] = useState<SeparationTier>('fast');
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast'): Promise<SeparationResult | null> => {
+  const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast', trackId?: string): Promise<SeparationResult | null> => {
+    // Cache key: use stable trackId if provided (survives URL expiry on refresh).
+    // Falls back to audioUrl only when trackId is not available (e.g. Party Mode
+    // background pre-separation where we may not have the track object).
+    const cacheKey = trackId ?? audioUrl;
     setIsProcessing(true);
     setProgress('Checking cache...');
     setError(null);
@@ -212,13 +214,8 @@ export function useVocalSeparation() {
     // wins and does the real work (cache check, then Modal if needed);
     // every other caller for the same URL just attaches to that one
     // shared result, regardless of which tier or page triggered it.
-    const existing = separationPromiseCache.get(audioUrl);
+    const existing = separationPromiseCache.get(cacheKey);
     if (existing) {
-      // Expose the ACTUAL tier already in flight, not the tier this
-      // particular caller happened to request -- e.g. Sing.tsx asks for
-      // 'fast' by default, but if it's attaching to Party Mode's
-      // already-running 'background' pre-separation, the wait screen
-      // needs to know it's really waiting on the slower T4 tier.
       setActiveTier(existing.tier);
       setProgress('AI vocal separation in progress...');
       const result = await existing.promise;
@@ -233,16 +230,16 @@ export function useVocalSeparation() {
     const shared = new Promise<SeparationResult | null>((resolve) => {
       resolveShared = resolve;
     });
-    separationPromiseCache.set(audioUrl, { promise: shared, tier });
+    separationPromiseCache.set(cacheKey, { promise: shared, tier });
     abortControllerRef.current = new AbortController();
 
     try {
       // Cache check now happens INSIDE the claimed slot -- no one else can
       // race past this, since they'd already have attached to `shared` above.
       try {
-        const cached = await getCachedTracks(audioUrl);
+        const cached = await getCachedTracks(cacheKey);
         if (cached) {
-          sepLog('CACHE', 'IndexedDB HIT -- skipping Modal, instant playback');
+          sepLog('CACHE', `IndexedDB HIT (key: ${cacheKey.slice(0, 30)}) -- skipping Modal, instant playback`);
           const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
           const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
           const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
@@ -323,8 +320,8 @@ export function useVocalSeparation() {
       resolveShared(null);
       return null;
     } finally {
-      if (separationPromiseCache.get(audioUrl)?.promise === shared) {
-        separationPromiseCache.delete(audioUrl);
+      if (separationPromiseCache.get(cacheKey)?.promise === shared) {
+        separationPromiseCache.delete(cacheKey);
       }
       abortControllerRef.current = null;
     }
