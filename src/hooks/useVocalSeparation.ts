@@ -235,19 +235,38 @@ export function useVocalSeparation() {
 
     try {
       // Cache check now happens INSIDE the claimed slot -- no one else can
-      // race past this, since they'd already have attached to `shared` above.
+      // Race past this, since they'd already have attached to `shared` above.
       try {
-        const cached = await getCachedTracks(cacheKey);
+        // Try stable trackId key first (new format), then fall back to audioUrl
+        // (old format — songs cached before the key migration). This ensures
+        // songs cached under the old audioUrl key still hit the cache.
+        let cached = await getCachedTracks(cacheKey);
+        if (!cached && cacheKey !== audioUrl) {
+          cached = await getCachedTracks(audioUrl);
+          if (cached) {
+            sepLog('CACHE', `IndexedDB HIT on legacy audioUrl key — will re-cache under trackId`);
+          }
+        }
+
         if (cached) {
-          sepLog('CACHE', `IndexedDB HIT (key: ${cacheKey.slice(0, 30)}) -- skipping Modal, instant playback`);
-          const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
-          const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
-          const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
-          setSeparatedAudio(result);
-          setProgress('');
-          setIsProcessing(false);
-          resolveShared(result);
-          return result;
+          // Validate blob is non-empty before using it. A 0-byte or tiny blob
+          // means the fetch was interrupted during caching — treat as a miss
+          // and fall through to Modal to get fresh stems.
+          const MIN_BLOB_SIZE = 10 * 1024; // 10KB minimum — any real audio file is larger
+          if (cached.instrumentalBlob.size < MIN_BLOB_SIZE) {
+            sepLog('CACHE', `IndexedDB entry corrupted (${cached.instrumentalBlob.size} bytes) — falling through to Modal`);
+            // Non-fatal — just fall through to Modal, it will re-cache correctly after separation
+          } else {
+            sepLog('CACHE', `IndexedDB HIT (key: ${cacheKey.slice(0, 30)}, ${Math.round(cached.instrumentalBlob.size / 1024)}KB) -- skipping Modal`);
+            const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
+            const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
+            const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
+            setSeparatedAudio(result);
+            setProgress('');
+            setIsProcessing(false);
+            resolveShared(result);
+            return result;
+          }
         }
       } catch (e) {
         console.warn('[VocalSeparation] Cache check failed (non-fatal, falling through to Modal):', e);
