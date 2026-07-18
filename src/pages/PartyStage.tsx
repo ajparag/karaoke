@@ -27,6 +27,7 @@ import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { saveCachedTracks, getCachedTracks } from "@/lib/audioCache";
 import { getDeviceId } from "@/hooks/usePartyDevice";
 import { ArrowLeft, Copy, Check, Play, X, Music, Loader2, PartyPopper, Share2, HelpCircle, Search, Plus } from "lucide-react";
+import { PartyLeaderboard } from "@/components/PartyLeaderboard";
 
 interface SearchTrack {
   id: string;
@@ -266,7 +267,7 @@ export default function PartyStage() {
     };
 
     sessionStorage.setItem("selectedTrack", JSON.stringify(track));
-    sessionStorage.setItem("activePartyContext", JSON.stringify({ code: code?.toUpperCase(), queueId: item.id, singerName: item.singer_name }));
+    sessionStorage.setItem("activePartyContext", JSON.stringify({ code: code?.toUpperCase(), queueId: item.id, singerName: item.singer_name, stageId }));
 
     sessionStorage.removeItem("prefetchedLyrics");
     fetchLyricsCached({
@@ -305,19 +306,17 @@ export default function PartyStage() {
   return (
     <div className="min-h-screen bg-background">
       <header className="glass border-b border-border p-4 sticky top-0 z-50">
-        <div className="max-w-3xl mx-auto flex items-center gap-3">
-          <div className="flex-1 min-w-0">
+        <div className="max-w-3xl mx-auto flex items-center gap-4">
+          <Link to="/">
+            <Button variant="ghost" size="icon"><ArrowLeft className="w-5 h-5" /></Button>
+          </Link>
+          <div className="flex-1">
             <h1 className="font-semibold text-xl flex items-center gap-2">
-              <PartyPopper className="w-5 h-5 text-primary shrink-0" /> <span className="truncate">{stageName}</span>
+              <PartyPopper className="w-5 h-5 text-primary" /> {stageName}
             </h1>
             <p className="text-sm text-muted-foreground">You're hosting -- only you can play songs</p>
           </div>
-          <Link to="/">
-            <Button variant="ghost" size="sm" className="shrink-0 gap-1" title="Leave this screen -- party stays active, come back anytime with the code">
-              <ArrowLeft className="w-4 h-4" /> Home
-            </Button>
-          </Link>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={handleEndParty}>End Party</Button>
+          <Button variant="outline" size="sm" onClick={handleEndParty}>End Party</Button>
         </div>
       </header>
 
@@ -449,23 +448,13 @@ export default function PartyStage() {
           </div>
         )}
 
-        {/* Completed / scores tonight */}
-        {completedSongs.length > 0 && (
-          <div>
-            <p className="text-xs text-muted-foreground mb-2 px-1">Tonight's Scores</p>
-            <div className="space-y-1">
-              {completedSongs.map((item, i) => (
-                <div key={item.id} className="flex items-center gap-3 p-2 rounded-lg">
-                  <span className="text-sm font-bold text-muted-foreground w-5">{i + 1}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{item.singer_name}</p>
-                    <p className="text-xs text-muted-foreground truncate">{item.song_title}</p>
-                  </div>
-                  <span className="text-sm font-semibold text-primary shrink-0">{item.rating} · {item.score}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+        {/* Party Leaderboard */}
+        {stageId && (
+          <PartyLeaderboard
+            stageId={stageId}
+            currentSingerName={singingSong?.singer_name ?? null}
+            isPartyActive={true}
+          />
         )}
       </main>
     </div>

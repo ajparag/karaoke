@@ -87,7 +87,7 @@ const Sing = () => {
   const [showResults, setShowResults] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
-  const [scoreSaveIsDuplicate, setScoreSaveIsDuplicate] = useState(false);
+
   const [guestName, setGuestName] = useState('');
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [volume, setVolume] = useState(80);
@@ -1064,7 +1064,6 @@ const Sing = () => {
 
     setIsSaving(true);
     setScoreSaveStatus('saving');
-    setScoreSaveIsDuplicate(false);
     try {
       // Floored at 0 before submission -- the backend clamps timingAccuracy
       // to [0,100] anyway, but being explicit here keeps the stored value
@@ -1086,6 +1085,13 @@ const Sing = () => {
         ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
         : (guestName.trim() || 'Guest');
 
+      // Read party context early so we can include stageId in the payload.
+      const partyContextRaw = sessionStorage.getItem('activePartyContext');
+      let stageId: string | null = null;
+      if (partyContextRaw) {
+        try { stageId = JSON.parse(partyContextRaw)?.stageId ?? null; } catch { /* non-fatal */ }
+      }
+
       const payload = {
         songTitle: track.title,
         songArtist: track.artist,
@@ -1098,6 +1104,7 @@ const Sing = () => {
         playedSeconds: Math.round(currentTime),
         thumbnailUrl: track.thumbnail,
         displayName,
+        stageId,
         // city intentionally omitted -- the edge function auto-detects it
         // from the request's IP address when not provided.
       };
@@ -1108,12 +1115,9 @@ const Sing = () => {
       setScoreSaveStatus('saved');
       console.log('[Leaderboard] Score auto-saved:', totalScore, scoreRating);
 
-      // If this song was played as part of a Party (host-controlled stage),
-      // also write the score back to that stage's queue row so it shows up
-      // in the "Tonight's Scores" list on both the host and participant
-      // screens. Non-fatal if this fails -- the leaderboard save above is
-      // the source of truth; party display is a nice-to-have on top.
-      const partyContextRaw = sessionStorage.getItem('activePartyContext');
+      // Also write the score back to the stage_queue row so the host's
+      // PartyStage and participants' PartyQueue see the completed status
+      // immediately via Realtime. Non-fatal if this fails.
       if (partyContextRaw) {
         try {
           const { queueId } = JSON.parse(partyContextRaw);
@@ -1130,14 +1134,6 @@ const Sing = () => {
       }
     } catch (error: any) {
       console.error('[Leaderboard] Auto-save failed:', error);
-      // Duck-typed check for a 409 (duplicate submission, same song within
-      // the last 24h) -- FunctionsHttpError attaches the original Response
-      // to .context. Checking status directly rather than importing the
-      // error class, since it isn't cleanly re-exported from the main
-      // supabase-js package's public types.
-      if (error?.context?.status === 409) {
-        setScoreSaveIsDuplicate(true);
-      }
       setScoreSaveStatus('failed');
     } finally {
       setIsSaving(false);
@@ -1459,10 +1455,7 @@ const Sing = () => {
                         Saved to leaderboard
                       </>
                     )}
-                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
-                      <span>Try the same song again after 24 hrs</span>
-                    )}
-                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
+                    {scoreSaveStatus === 'failed' && (
                       <>
                         <span>Could not save score</span>
                         <button
@@ -1534,17 +1527,12 @@ const Sing = () => {
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Saving to leaderboard...
                       </>
-                    )}
                     {scoreSaveStatus === 'saved' && (
                       <>
                         <Check className="w-4 h-4 text-green-500" />
                         Saved to leaderboard
                       </>
-                    )}
-                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
-                      <span>Try the same song again after 24 hrs</span>
-                    )}
-                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
+                    {scoreSaveStatus === 'failed' && (
                       <>
                         <span>Could not save score</span>
                         <button
@@ -1614,17 +1602,12 @@ const Sing = () => {
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Saving to leaderboard...
                       </>
-                    )}
                     {scoreSaveStatus === 'saved' && (
                       <>
                         <Check className="w-4 h-4 text-green-500" />
                         Saved to leaderboard
                       </>
-                    )}
-                    {scoreSaveStatus === 'failed' && scoreSaveIsDuplicate && (
-                      <span>Try the same song again after 24 hrs</span>
-                    )}
-                    {scoreSaveStatus === 'failed' && !scoreSaveIsDuplicate && (
+                    {scoreSaveStatus === 'failed' && (
                       <>
                         <span>Could not save score</span>
                         <button

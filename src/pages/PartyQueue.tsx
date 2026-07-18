@@ -18,6 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 import { getDeviceId, getGuestName } from "@/hooks/usePartyDevice";
 import { parseDurationToSeconds } from "@/lib/lyricsClient";
 import { ArrowLeft, Search, Music, Plus, X, Loader2, PartyPopper, Check } from "lucide-react";
+import { PartyLeaderboard } from "@/components/PartyLeaderboard";
 
 interface SearchTrack {
   id: string;
@@ -60,6 +61,7 @@ export default function PartyQueue() {
   const [addedId, setAddedId] = useState<string | null>(null);
 
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [isPartyActive, setIsPartyActive] = useState(true);
 
   const deviceId = getDeviceId();
 
@@ -108,11 +110,28 @@ export default function PartyQueue() {
       if (data) setQueue(data as QueueItem[]);
     };
     fetchQueue();
-    const channel = supabase
+
+    const queueChannel = supabase
       .channel(`stage-queue-participant-${stageId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "stage_queue", filter: `stage_id=eq.${stageId}` }, fetchQueue)
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    // Listen for host ending the party (is_active → false)
+    const stageChannel = supabase
+      .channel(`stage-active-${stageId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "stages", filter: `id=eq.${stageId}` },
+        (payload) => {
+          if (payload.new?.is_active === false) setIsPartyActive(false);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(queueChannel);
+      supabase.removeChannel(stageChannel);
+    };
   }, [stageId]);
 
   const handleSearch = useCallback(async () => {
@@ -267,21 +286,13 @@ export default function PartyQueue() {
           </div>
         )}
 
-        {completedSongs.length > 0 && (
-          <div>
-            <p className="text-xs text-muted-foreground mb-2 px-1">Tonight's Scores</p>
-            <div className="space-y-1">
-              {completedSongs.map((item, i) => (
-                <div key={item.id} className="flex items-center gap-3 p-2 rounded-lg">
-                  <span className="text-sm font-bold text-muted-foreground w-5">{i + 1}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{item.singer_name}</p>
-                  </div>
-                  <span className="text-sm font-semibold text-primary shrink-0">{item.rating} · {item.score}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+        {/* Party Leaderboard */}
+        {stageId && (
+          <PartyLeaderboard
+            stageId={stageId}
+            currentSingerName={singingSong?.singer_name ?? null}
+            isPartyActive={isPartyActive}
+          />
         )}
       </main>
     </div>
