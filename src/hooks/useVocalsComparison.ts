@@ -1107,9 +1107,6 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
       'pitch:', smoothPitchRef.current.toFixed(1),
       'rhythm:', smoothRhythmRef.current.toFixed(1),
       'expression:', smoothTechRef.current.toFixed(1));
-      'pitch:', smoothPitchRef.current.toFixed(1),
-      'rhythm:', smoothRhythmRef.current.toFixed(1),
-      'tech:', smoothTechRef.current.toFixed(1));
   }, []);
 
   // ─── resetScores: full song-change reset, including reference teardown ────
