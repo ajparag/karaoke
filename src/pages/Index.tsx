@@ -28,8 +28,9 @@ import { Input } from "@/components/ui/input";
 import { Music, Trophy, Loader2, Play, Search, LogOut, User, Sun, Moon, PartyPopper, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-import { useVocalSeparation, prefetchAudio, warmUpHFSpace } from "@/hooks/useVocalSeparation";
+import { useVocalSeparation, warmUpModal } from "@/hooks/useVocalSeparation";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
+import { getCachedTracks } from "@/lib/audioCache";
 import { useAuth } from "@/hooks/useAuth";
 import { useTheme } from "@/hooks/useTheme";
 import { useBackGuard } from "@/hooks/useBackGuard";
@@ -189,7 +190,6 @@ const Index = () => {
   };
 
   const handleSearch = () => {
-    warmUpHFSpace();
     searchWithQuery(query);
   };
 
@@ -233,12 +233,29 @@ const Index = () => {
       console.warn('[Index] Lyrics prefetch failed:', err?.message || err);
     });
 
-    // Start AI vocal separation in the background
-    console.log('[Index] Starting background AI separation for:', track.title);
-    separateVocals(track.audioUrl).then((result) => {
-      if (result) {
-        console.log('[Index] Background AI separation complete:', result.fromCache ? 'cached' : 'newly processed');
+    // Check IndexedDB first using stable track.id as key.
+    // Cache HIT  → start separation (will return from cache instantly, no Modal call).
+    // Cache MISS → warm up Modal NOW so the container is ready by the time
+    //              Sing.tsx triggers separation after navigation (~1-2s window).
+    // This avoids wasting a warmup ping when the song is already cached.
+    getCachedTracks(track.id).then(cached => {
+      if (cached) {
+        console.log('[Index] IndexedDB HIT for', track.id, '-- skipping Modal warmup');
+      } else {
+        console.log('[Index] IndexedDB MISS for', track.id, '-- warming up Modal');
+        warmUpModal();
       }
+      // Start AI vocal separation regardless -- hook handles cache hit instantly
+      console.log('[Index] Starting background AI separation for:', track.title);
+      separateVocals(track.audioUrl, 'fast', track.id).then((result) => {
+        if (result) {
+          console.log('[Index] Background AI separation complete:', result.fromCache ? 'cached' : 'newly processed');
+        }
+      });
+    }).catch(() => {
+      // Cache check failed — warm up Modal to be safe and proceed normally
+      warmUpModal();
+      separateVocals(track.audioUrl, 'fast', track.id);
     });
 
     // Navigate to sing page immediately
@@ -433,7 +450,7 @@ const Index = () => {
                     key={track.id}
                     className="group flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 transition-colors cursor-pointer"
                     onClick={() => handleSelectTrack(track)}
-                    onMouseEnter={() => { if (track.audioUrl) prefetchAudio(track.audioUrl); }}
+                    onMouseEnter={() => {}}
                   >
                     {/* Thumbnail */}
                     <div className="relative w-12 h-12 rounded-lg overflow-hidden bg-muted shrink-0">

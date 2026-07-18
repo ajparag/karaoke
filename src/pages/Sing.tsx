@@ -262,7 +262,7 @@ const Sing = () => {
       if (separationTriggeredRef.current === track.audioUrl) return;
       separationTriggeredRef.current = track.audioUrl;
 
-      loadFromCache(track.audioUrl).then((result) => {
+      loadFromCache(track.audioUrl, 'fast', track.id).then((result) => {
         if (result) {
         }
       });
@@ -412,7 +412,7 @@ const Sing = () => {
           cachingTriggeredRef.current = true;
           const instUrl = separatedAudio.instrumentalUrl;
           const vocUrl = separatedAudio.vocalsUrl;
-          const originalAudioUrl = track.audioUrl;
+          const trackCacheKey = track.id;  // stable ID — survives signed URL expiry
           (async () => {
             try {
               console.log('[Cache] Song fully buffered -- caching stems in background');
@@ -423,8 +423,8 @@ const Sing = () => {
                 const vocResp = await fetch(vocUrl);
                 vocBlob = await vocResp.blob();
               }
-              await saveCachedTracks(originalAudioUrl, instBlob, vocBlob);
-              console.log('[Cache] Saved to IndexedDB -- instant replay next time');
+              await saveCachedTracks(trackCacheKey, instBlob, vocBlob);
+              console.log('[Cache] Saved to IndexedDB with key:', trackCacheKey, '-- instant replay next time');
             } catch (e) {
               console.warn('[Cache] Background caching failed (non-fatal):', e);
             }
