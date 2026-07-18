@@ -1527,11 +1527,13 @@ const Sing = () => {
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Saving to leaderboard...
                       </>
+                    )}
                     {scoreSaveStatus === 'saved' && (
                       <>
                         <Check className="w-4 h-4 text-green-500" />
                         Saved to leaderboard
                       </>
+                    )}
                     {scoreSaveStatus === 'failed' && (
                       <>
                         <span>Could not save score</span>
@@ -1602,11 +1604,13 @@ const Sing = () => {
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Saving to leaderboard...
                       </>
+                    )}
                     {scoreSaveStatus === 'saved' && (
                       <>
                         <Check className="w-4 h-4 text-green-500" />
                         Saved to leaderboard
                       </>
+                    )}
                     {scoreSaveStatus === 'failed' && (
                       <>
                         <span>Could not save score</span>
