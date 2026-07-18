@@ -257,7 +257,7 @@ const Sing = () => {
   // IMPORTANT: Only call once per track to avoid duplicate processing.
   const separationTriggeredRef = useRef<string | null>(null);
   useEffect(() => {
-    if (isTestPlayerMode) return; // Skip separation in test mode
+    if (isTestPlayerMode) return;
     if (track?.audioUrl && !separatedAudio && !isLoadingFromCache) {
       if (separationTriggeredRef.current === track.audioUrl) return;
       separationTriggeredRef.current = track.audioUrl;
@@ -396,26 +396,29 @@ const Sing = () => {
           console.log('[sing] progress: buffered', bufferedEnd, 's');
         }
 
-        // Once the song has FULLY buffered (not just enough to play), cache
-        // the separated stems in IndexedDB in the background for instant
-        // replay next time. Fires once per track. Streaming playback is
-        // completely untouched -- this only runs after buffering is
-        // already complete, well clear of the reference-audio load window.
+        // Cache stems once streaming is fully complete (all audio data
+        // downloaded into the browser buffer). This fires independently of
+        // whether the user has finished singing — they could pause, skip,
+        // or still be mid-song. The only requirement is that the audio
+        // element has received all bytes, which is the correct moment to
+        // snapshot the blobs for instant replay on next visit/refresh.
+        // Cache key is track.id (stable) not audioUrl (signed, expires).
         if (
           !cachingTriggeredRef.current &&
           audio.duration > 0 &&
+          audio.buffered.length > 0 &&
           audio.buffered.end(audio.buffered.length - 1) >= audio.duration - 1 &&
           separatedAudio &&
           !separatedAudio.fromCache &&
-          track?.audioUrl
+          track?.id
         ) {
           cachingTriggeredRef.current = true;
           const instUrl = separatedAudio.instrumentalUrl;
           const vocUrl = separatedAudio.vocalsUrl;
-          const trackCacheKey = track.id;  // stable ID — survives signed URL expiry
+          const trackCacheKey = track.id;
           (async () => {
             try {
-              console.log('[Cache] Song fully buffered -- caching stems in background');
+              console.log('[Cache] Streaming complete — caching stems in background');
               const instResp = await fetch(instUrl);
               const instBlob = await instResp.blob();
               let vocBlob: Blob | undefined;
