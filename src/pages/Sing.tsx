@@ -132,7 +132,11 @@ const Sing = () => {
   const scoreAccumulatorRef = useRef({ pitch: 0, rhythm: 0, technique: 0, count: 0 });
 
   // New scoring weights: Pitch 40%, Rhythm 30%, Technique 30% (no diction)
-  const SCORE_WEIGHTS = useRef({ pitch: 1/3, rhythm: 1/3, technique: 1/3 }).current;
+  // Pitch weighted at 0.50 — the hardest and most meaningful measure of
+  // singing ability. Rhythm and technique at 0.25 each — achievable by
+  // average singers and should not dominate the headline score.
+  // Was 1/3 each which allowed rhythm/technique to prop up weak pitch scores.
+  const SCORE_WEIGHTS = useRef({ pitch: 0.50, rhythm: 0.25, technique: 0.25 }).current;
 
   // -- Android hardware volume: audioSession declaration only -------------
   // REMOVED: the old silent-oscillator-AudioContext trick. That trick
@@ -697,11 +701,8 @@ const Sing = () => {
         avgRhythm    * SCORE_WEIGHTS.rhythm +
         avgTechnique * SCORE_WEIGHTS.technique;
 
-      // Scale 0-100 -> 0-1000 for the displayed score. Now derived from the
-      // same running averages as the breakdown, so the two always agree.
-      // Negative marking (missed notes during vocals) can drag the internal
-      // average below 0 -- that's the intended penalty. Floor only the
-      // final displayed/leaderboard number at 0 so it never shows negative.
+      // Purely additive system — combined is always >= 0.
+      // Floor at 0 kept defensively but should never be needed.
       setTotalScore(Math.max(0, Math.round(combined * 10)));
     };
 
