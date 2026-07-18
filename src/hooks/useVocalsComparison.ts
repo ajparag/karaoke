@@ -139,8 +139,6 @@ import {
   SILENCE_RMS,
   ONSET_WINDOW_MS,
 } from '@/lib/vocalScoring';
-// NOTE: REF_PARTIAL_CREDIT_NO_USERPITCH removed — amateur singers are loud;
-// a pitchless signal above the voice threshold is noise, not soft singing.
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -178,7 +176,8 @@ const HISTORY_FRAMES = 60;
 const REF_VOCAL_THRESHOLD = 0.04; // higher than SILENCE_RMS (0.015) to ignore residual bleed in vocal stem          // ~1s of history at 60fps for technique scoring
 const SCORE_SMOOTHING = 0.12;       // EMA smoothing factor for displayed scores
 const REF_PARTIAL_CREDIT_NO_REFPITCH = 40;
-
+// NOTE: REF_PARTIAL_CREDIT_NO_USERPITCH removed — amateur singers are loud;
+// a pitchless signal above the voice threshold is noise, not soft singing.
 const ONSET_DEBOUNCE_MS = 100;
 const REF_BUFFER_TIMEOUT_MS = 4000;       // soft checkpoint — logs a warning, does not give up
 const REF_BUFFER_HARD_TIMEOUT_MS = 15000; // hard ceiling — actually gives up here
@@ -859,12 +858,11 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
           const candidate = userVolume < 0.03 ? userVolume : nf;
           noiseFloorRef.current = nf * 0.98 + candidate * 0.02;
         }
-        // Threshold tightened in two steps:
-        // Step 1 (prev): 4x → 8x multiplier, floor 0.005 → 0.012
-        // Step 2 (this): 8x → 10x multiplier, floor 0.012 → 0.018
-        // Ambient noise typically sits at 1-3x noise floor; 10x requires
-        // a signal clearly above background, consistent with vocalisation.
-        // Floor raised to 0.018 to handle near-zero noise floor at song start.
+        // Threshold tightened: floor 0.005 → 0.018, multiplier 4x → 10x.
+        // Ambient noise (fan, AC, room hiss) typically sits at 1-3x noise floor.
+        // 4x was too easy to cross without singing. 10x requires a signal
+        // meaningfully above background — consistent with actual vocalisation.
+        // Floor 0.018 handles near-zero noise floor at song start.
         const voiceThreshold = Math.max(0.018, noiseFloorRef.current * 10);
         const isVoiceDetected = userVolume > voiceThreshold;
         const userPitch = detectPitchAC(timeFloat, userAudioCtxRef.current.sampleRate);
@@ -984,27 +982,27 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
         const totalFrames = pitchFramesRef.current;
         const rawPitch = totalFrames > 0 ? pitchScoreAccRef.current / totalFrames : 0;
         const missRatio = totalFrames > 0 ? missedFramesRef.current / totalFrames : 0;
-        // No secondary multiplier needed -- negative marking above already
-        // IS the proportional penalty. (The old MISS_PENALTY_CAP multiplier
-        // would now work backwards: multiplying an already-negative rawPitch
-        // by a positive fraction <1 makes it LESS negative, softening the
-        // penalty instead of adding to it.)
         const pitchFinal = rawPitch;
 
         // Update prevReferenceActiveRef for next frame's history push gating.
         prevReferenceActiveRef.current = referenceActive;
 
-        // EMAs only update when the reference vocal is active (someone is singing
-        // in the original). When referenceActive=false (instrumental break OR
-        // inter-phrase gap), all three EMAs hold their last values immediately.
-        // No counter, no delay, no decay. The score freezes the instant the
-        // reference vocal stops and resumes the instant it starts again.
-        if (referenceActive) {
+        // EMAs update only when reference is active AND user voice is detected.
+        // Gating rhythm and technique behind isVoiceDetected prevents ambient
+        // noise energy from generating false onset/energy matches against the
+        // reference — which was causing 160-320 scores for silent users in
+        // noisy rooms. A silent user should score 0 on all three dimensions.
+        if (referenceActive && isVoiceDetected) {
           const rawRhythm = scoreRhythm(userOnsetsRef.current, refOnsetsRef.current, ONSET_WINDOW_MS);
           const rawTech = scoreTechnique(userEnergyHistRef.current, refEnergyHistRef.current, SILENCE_RMS);
           smoothPitchRef.current = smoothPitchRef.current * (1 - SCORE_SMOOTHING) + pitchFinal * SCORE_SMOOTHING;
           smoothRhythmRef.current = smoothRhythmRef.current * (1 - SCORE_SMOOTHING) + rawRhythm * SCORE_SMOOTHING;
           smoothTechRef.current = smoothTechRef.current * (1 - SCORE_SMOOTHING) + rawTech * SCORE_SMOOTHING;
+        } else if (referenceActive && !isVoiceDetected) {
+          // Reference is active but user is silent — only update pitch EMA
+          // (which already has the miss penalty baked in). Rhythm and technique
+          // stay frozen at their last values — no noise contribution.
+          smoothPitchRef.current = smoothPitchRef.current * (1 - SCORE_SMOOTHING) + pitchFinal * SCORE_SMOOTHING;
         }
 
         // ── Permanent diagnostic logging (standing requirement) ─────────────
