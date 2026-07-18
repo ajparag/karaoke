@@ -137,31 +137,10 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Duplicate-submission check. Signed-in users dedupe by user_id (as
-    // before). Anonymous submissions have no user_id, so they dedupe by
-    // IP address instead -- same "one score per song per 24h" rule,
-    // applied via whichever identity we actually have.
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    let dedupeQuery = adminClient
-      .from("scores")
-      .select("id")
-      .eq("track_id", trackId)
-      .gte("created_at", since)
-      .limit(1);
-
-    dedupeQuery = userId
-      ? dedupeQuery.eq("user_id", userId)
-      : clientIp
-        ? dedupeQuery.eq("ip_address", clientIp)
-        : dedupeQuery; // no userId AND no IP available -- skip dedupe, don't block a legitimate submission
-
-    if (userId || clientIp) {
-      const { data: existing, error: existingError } = await dedupeQuery;
-      if (existingError) throw existingError;
-      if (existing && existing.length > 0) {
-        return json({ error: "Try the same song again after 24 hrs" }, 409);
-      }
-    }
+    // stageId -- present only when the song was sung as part of a Party
+    // session. Links this score row to the party for the party leaderboard.
+    // NULL for all solo (non-party) submissions.
+    const stageId = cleanText(body.stageId, 100) || null;
 
     const { data, error } = await adminClient
       .from("scores")
@@ -178,7 +157,8 @@ serve(async (req) => {
         duration_seconds: durationSeconds,
         display_name: displayName,
         city,
-        ip_address: userId ? null : clientIp, // only stored for anonymous dedupe -- not needed once a real account exists
+        ip_address: userId ? null : clientIp,
+        stage_id: stageId,
       })
       .select("id")
       .single();
