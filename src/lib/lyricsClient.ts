@@ -106,11 +106,11 @@ export function scriptPenalty(script: Script, language?: string): number {
   const isHindi = (language || '').toLowerCase() === 'hindi';
   if (!isHindi) return 0;
   switch (script) {
-    case 'devanagari': return 0;
-    case 'latin': return 0;
-    case 'unknown': return 3;
-    case 'gurmukhi': return 5;
-    case 'dual': return 5;
+    case 'devanagari': return 0;   // preferred — correct script for Hindi
+    case 'latin':      return 2;   // romanised lyrics — usable but not ideal
+    case 'unknown':    return 3;   // no detectable script — uncertain quality
+    case 'gurmukhi':   return 5;   // Punjabi script — deprioritised for Hindi songs
+    case 'dual':       return 5;   // mixed Punjabi/Devanagari — deprioritised
   }
 }
 
