@@ -18,8 +18,10 @@
 //
 //   Cascade logic (simple — zero results triggers next tier):
 //   Plan A: saavn.sumit.co (best metadata, play counts, language fields)
-//   Plan B: self-hosted cyberboysumanjay/JioSaavnAPI on GCP VM
-//            configured via JIOSAAVN_FALLBACK_URL secret
+//   Plan B: GaanaPy on Render (gaanapy-2ta9.onrender.com)
+//            fork of ZingyTomato/GaanaPy — different source, different IP
+//            configured via GAANA_API_URL secret
+//            returns HLS stream URLs, signed tokens expire in ~4hrs
 //   Plan C: self-hosted yt-dlp Flask server on same GCP VM
 //            configured via YOUTUBE_SEARCH_URL secret
 //            YouTube never blocks cloud IPs; audio URLs work with Modal.
@@ -246,58 +248,77 @@ async function searchPlanA(query: string): Promise<Track[]> {
   });
 }
 
-// ─── Plan B: self-hosted cyberboysumanjay/JioSaavnAPI ─────────────────────
+// ─── Plan B: GaanaPy (gaanapy-2ta9.onrender.com) ─────────────────────────
+//
+// Self-hosted fork of ZingyTomato/GaanaPy deployed on Render.
+// Returns HLS stream URLs (signed, expire in ~4hrs) — acceptable since
+// users won't wait that long between search and singing.
+// play_count field is a string like "180M+" — not useful for ranking.
+// popularity field has the raw number "180431071~180431071" — we parse
+// the first part for ranking.
+// Configured via GAANA_API_URL secret.
 
 async function searchPlanB(query: string): Promise<Track[]> {
-  const fallbackBase = Deno.env.get('JIOSAAVN_FALLBACK_URL');
-  if (!fallbackBase) {
-    console.log('[Plan B] JIOSAAVN_FALLBACK_URL not set — skipping');
+  const gaanaBase = Deno.env.get('GAANA_API_URL');
+  if (!gaanaBase) {
+    console.log('[Plan B] GAANA_API_URL not set — skipping');
     return [];
   }
 
-  console.log('[Plan B] self-hosted JioSaavnAPI query:', query);
+  console.log('[Plan B] Gaana query:', query);
   try {
-    const url = `${fallbackBase.replace(/\/$/, '')}/result/?query=${encodeURIComponent(query)}`;
+    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search?query=${encodeURIComponent(query)}&limit=20`;
     const response = await timedFetch(url, 10000);
     if (!response.ok) {
-      console.error('[Plan B] error:', response.status);
+      console.error('[Plan B] Gaana error:', response.status);
       return [];
     }
 
     const data = await response.json();
-    const rawList: any[] = Array.isArray(data) ? data
-      : Array.isArray(data?.results) ? data.results
-      : Array.isArray(data?.data) ? data.data
-      : [];
+    const rawList: any[] = Array.isArray(data) ? data : [];
 
     if (rawList.length === 0) {
-      console.log('[Plan B] returned empty — cascading to Plan C');
+      console.log('[Plan B] Gaana returned empty — cascading to Plan C');
       return [];
     }
 
-    console.log(`[Plan B] returned ${rawList.length} results`);
+    console.log(`[Plan B] Gaana returned ${rawList.length} results`);
     return rawList
-      .filter((s: any) => s?.media_url)
+      .filter((s: any) => s?.stream_urls?.urls?.very_high_quality || s?.stream_urls?.urls?.high_quality)
       .map((s: any): Track => {
         const durationSecs = parseInt(s.duration, 10) || 0;
-        const year = typeof s.year === 'string' && /^\d{4}$/.test(s.year) ? parseInt(s.year, 10) : undefined;
-        const artistName = (s.singers && s.singers.trim()) || s.primary_artists || 'Unknown Artist';
+        // popularity is "180431071~180431071" — parse first number
+        const popularityRaw = typeof s.popularity === 'string' ? s.popularity.split('~')[0] : '0';
+        const playCount = parseInt(popularityRaw, 10) || 0;
+        // prefer highest quality HLS stream
+        const audioUrl =
+          s.stream_urls?.urls?.very_high_quality ||
+          s.stream_urls?.urls?.high_quality ||
+          s.stream_urls?.urls?.medium_quality || '';
+        const thumbnail =
+          s.images?.urls?.large_artwork ||
+          s.images?.urls?.medium_artwork ||
+          s.images?.urls?.small_artwork || '';
+        const releaseDate = typeof s.release_date === 'string' ? s.release_date : undefined;
+        const year = releaseDate ? parseInt(releaseDate.slice(0, 4), 10) : undefined;
+
         return {
-          id: s.id || s.media_url,
-          title: decodeHtmlEntities(s.song || s.title || 'Unknown'),
-          artist: decodeHtmlEntities(artistName),
-          thumbnail: s.image || '',
+          id: s.track_id || s.seokey,
+          title: decodeHtmlEntities(s.title || 'Unknown'),
+          artist: decodeHtmlEntities(s.artists || 'Unknown Artist'),
+          thumbnail,
           duration: formatDuration(durationSecs),
-          source: 'saavn',
-          audioUrl: s.media_url,
+          source: 'saavn', // Gaana is still an Indian music source
+          audioUrl,
           album: decodeHtmlEntities(s.album || ''),
-          playCount: typeof s.play_count === 'number' ? s.play_count : 0,
+          playCount,
           language: typeof s.language === 'string' ? s.language.toLowerCase() : undefined,
+          releaseDate,
           year,
         };
       });
   } catch (err) {
-    console.error('[Plan B] fetch error:', err);
+    console.error('[Plan B] Gaana fetch error:', err);
     return [];
   }
 }
