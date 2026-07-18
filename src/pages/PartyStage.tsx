@@ -301,7 +301,6 @@ export default function PartyStage() {
 
   const queuedSongs = queue.filter((q) => q.status === "queued");
   const singingSong = queue.find((q) => q.status === "singing");
-  const completedSongs = queue.filter((q) => q.status === "completed").sort((a, b) => (b.score || 0) - (a.score || 0));
 
   return (
     <div className="min-h-screen bg-background">
