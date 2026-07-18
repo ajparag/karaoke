@@ -134,24 +134,23 @@ import {
   dbEnergy,
   clamp100,
   scoreRhythm,
-  scoreTechnique,
+  scoreExpression,
   scorePitchFrame,
   SILENCE_RMS,
   ONSET_WINDOW_MS,
 } from '@/lib/vocalScoring';
+// scoreTechnique replaced by scoreExpression (pitch stability on sustained notes).
+// No penalties anywhere — silence earns 0, not negative.
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
 export interface VocalsComparisonMetrics {
-  pitchMatch: number;       // -100 to 100, smoothed -- CAN go negative (missed
-                             // frames during active vocals are penalized at -50
-                             // each; see the negative-marking logic below). Only
-                             // capped at 100 on the upper end, no floor at 0.
-  rhythmMatch: number;      // 0–100, smoothed
-  techniqueMatch: number;   // 0–100, smoothed
-  volume: number;           // current user mic volume (raw)
+  pitchMatch: number;        // 0–100, smoothed — average of scorePitchFrame() on voiced frames
+  rhythmMatch: number;       // 0–100, smoothed — onset timing match (flow)
+  techniqueMatch: number;    // 0–100, smoothed — pitch stability + sustain (expression)
+  volume: number;            // current user mic volume (raw)
   isVoiceDetected: boolean;
-  referenceActive: boolean; // is the reference vocal track currently audible (above SILENCE_RMS)
+  referenceActive: boolean;  // is the reference vocal track currently audible
   debug?: {
     voiceThreshold: number;
     noiseFloor: number;
@@ -401,15 +400,25 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
   const lastIsPlayingRef = useRef<boolean | undefined>(undefined);
 
   // ── Scoring accumulators (reset only by resetScores)
-  const pitchScoreAccRef = useRef(0);
-  const pitchFramesRef = useRef(0);
-  const missedFramesRef = useRef(0);
+  // ── Accuracy (pitch) — purely additive, no penalties ──────────────────────
+  // Only voiced frames with valid pitch are scored. Silence = skip (not -50).
+  const pitchScoreAccRef = useRef(0);  // sum of scorePitchFrame() on voiced frames
+  const pitchFramesRef = useRef(0);    // count of voiced frames scored (denominator)
+  // voicedFramesRef tracks frames where user was detected singing (for completion display)
+  const voicedFramesRef = useRef(0);
+  const totalRefActiveFramesRef = useRef(0); // total reference-active frames (for completion %)
+
+  // ── Rolling pitch history for expression (stability) scoring ───────────────
+  // Stores recent userPitch Hz values (0 = unvoiced). scoreExpression reads this.
+  const userPitchHistRef = useRef<number[]>([]);
+
+  // ── Energy histories (kept for refEnergy passed to scoreExpression) ─────────
+  const userEnergyHistRef = useRef<number[]>([]);
+  const refEnergyHistRef = useRef<number[]>([]);
   const userOnsetsRef = useRef<number[]>([]);
   const refOnsetsRef = useRef<number[]>([]);
   const lastUserOnsetRef = useRef(0);
   const lastRefOnsetRef = useRef(0);
-  const userEnergyHistRef = useRef<number[]>([]);
-  const refEnergyHistRef = useRef<number[]>([]);
   const smoothPitchRef = useRef(0);
   const smoothRhythmRef = useRef(0);
   const smoothTechRef = useRef(0);
@@ -888,7 +897,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
 
         // Only push to scoring histories when reference vocal was active last frame.
         // During instrumental breaks, skipping pushes keeps histories clean so
-        // scoreRhythm/scoreTechnique return valid data when singing resumes.
+        // scoreRhythm/scoreExpression return valid data when singing resumes.
         // Voice detection (userVolume, isVoiceDetected) still runs — only the
         // scoring-specific histories are gated.
         const refWasActive = prevReferenceActiveRef.current;
@@ -941,69 +950,65 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
           prevRefSilentRef.current = refIsSilent;
         }
 
-        // ── PITCH SCORING (per amateur-friendly requirements) ───────────────
-        // Only frames where the reference vocal is actually active count.
-        // A frame where the reference is silent (instrumental section) is
-        // simply not scored at all — neither rewarded nor penalised.
+        // ── PITCH SCORING — purely additive, no penalties ──────────────────
+        // Only frames where:
+        //   1. Reference vocal is active (referenceActive=true)
+        //   2. User voice is detected (isVoiceDetected=true)
+        //   3. Both user AND ref pitch are detected (> 0)
+        // contribute to the accuracy score.
+        // Silence, breath gaps, undetected pitch = skip (score 0, not -50).
+        // This separates "how well did you sing" from "how much did you sing".
         if (referenceActive) {
-          pitchFramesRef.current++;
-          if (!isVoiceDetected) {
-            // User is silent during active reference vocals — a genuine miss.
-            // Negative marking: a fully-missed frame costs HALF what a
-            // perfect frame earns (-50 vs +100), so staying silent for the
-            // song is NOT a safe way to avoid a low pitch score -- it
-            // actively drags the average down, though less punishingly
-            // than full symmetric marking. A 50% sung well (~90) / 50%
-            // silent performance nets to roughly (90*0.5 + -50*0.5) = 20,
-            // vs full-symmetric's -5 or the original floor-at-0's 45.
-            missedFramesRef.current++;
-            pitchScoreAccRef.current += -50;
-          } else if (refPitch > 0 && userPitch > 0) {
-            // Normal case — both pitches detected, score the match directly.
-            pitchScoreAccRef.current += scorePitchFrame(userPitch, refPitch, true);
-          } else if (refPitch === 0) {
-            // Reference pitch undetected during a section that IS active
-            // (breathy/complex vocal passage) but the user IS singing.
-            // Partial credit — we can't verify accuracy, but presence counts.
-            pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_REFPITCH;
-          } else if (userPitch === 0) {
-            // User volume crossed the voice threshold but pitch detection
-            // returned 0 — no detectable harmonic structure in the signal.
-            // For an amateur singer (this app's target audience), if they
-            // are singing loudly enough to clear 10x noise floor, pitch
-            // detection should succeed. A pitchless signal at that volume
-            // is almost certainly noise, not vocalisation.
-            // Treat as a miss — same penalty as silence during active vocals.
-            missedFramesRef.current++;
-            pitchScoreAccRef.current += -50;
+          totalRefActiveFramesRef.current++;
+
+          if (isVoiceDetected) {
+            voicedFramesRef.current++;
+            // Push pitch to history for expression scoring regardless of
+            // whether pitch was cleanly detected (0 = unvoiced frame)
+            userPitchHistRef.current.push(userPitch);
+            if (userPitchHistRef.current.length > HISTORY_FRAMES * 5) {
+              userPitchHistRef.current.shift();
+            }
+
+            if (refPitch > 0 && userPitch > 0) {
+              // Both pitches detected — score accuracy directly
+              pitchScoreAccRef.current += scorePitchFrame(userPitch, refPitch);
+              pitchFramesRef.current++;
+            } else if (refPitch === 0 && userPitch > 0) {
+              // Reference pitch undetectable (breathy/complex passage) but
+              // user IS singing. Give partial credit for presence — can't
+              // verify accuracy but singing effort counts.
+              pitchScoreAccRef.current += REF_PARTIAL_CREDIT_NO_REFPITCH;
+              pitchFramesRef.current++;
+            }
+            // refPitch > 0 && userPitch === 0: user voice detected but pitch
+            // undetectable — likely a transient/consonant. Skip this frame
+            // (no score contribution either way).
           }
         }
 
         const totalFrames = pitchFramesRef.current;
         const rawPitch = totalFrames > 0 ? pitchScoreAccRef.current / totalFrames : 0;
-        const missRatio = totalFrames > 0 ? missedFramesRef.current / totalFrames : 0;
-        const pitchFinal = rawPitch;
+        // Completion ratio for display — voiced frames / total ref-active frames
+        const completionRatio = totalRefActiveFramesRef.current > 0
+          ? voicedFramesRef.current / totalRefActiveFramesRef.current
+          : 0;
 
-        // Update prevReferenceActiveRef for next frame's history push gating.
-        prevReferenceActiveRef.current = referenceActive;
-
-        // EMAs update only when reference is active AND user voice is detected.
-        // Gating rhythm and technique behind isVoiceDetected prevents ambient
-        // noise energy from generating false onset/energy matches against the
-        // reference — which was causing 160-320 scores for silent users in
-        // noisy rooms. A silent user should score 0 on all three dimensions.
+        // ── EMA updates — only when reference is active AND user is singing ──
+        // No EMA update when user is silent — silence doesn't contribute
+        // to any score dimension (purely additive system).
         if (referenceActive && isVoiceDetected) {
           const rawRhythm = scoreRhythm(userOnsetsRef.current, refOnsetsRef.current, ONSET_WINDOW_MS);
-          const rawTech = scoreTechnique(userEnergyHistRef.current, refEnergyHistRef.current, SILENCE_RMS);
-          smoothPitchRef.current = smoothPitchRef.current * (1 - SCORE_SMOOTHING) + pitchFinal * SCORE_SMOOTHING;
+          const rawExpr = scoreExpression(userPitchHistRef.current, refEnergyHistRef.current, SILENCE_RMS);
+          smoothPitchRef.current = smoothPitchRef.current * (1 - SCORE_SMOOTHING) + rawPitch * SCORE_SMOOTHING;
           smoothRhythmRef.current = smoothRhythmRef.current * (1 - SCORE_SMOOTHING) + rawRhythm * SCORE_SMOOTHING;
-          smoothTechRef.current = smoothTechRef.current * (1 - SCORE_SMOOTHING) + rawTech * SCORE_SMOOTHING;
-        } else if (referenceActive && !isVoiceDetected) {
-          // Reference is active but user is silent — only update pitch EMA
-          // (which already has the miss penalty baked in). Rhythm and technique
-          // stay frozen at their last values — no noise contribution.
-          smoothPitchRef.current = smoothPitchRef.current * (1 - SCORE_SMOOTHING) + pitchFinal * SCORE_SMOOTHING;
+          smoothTechRef.current = smoothTechRef.current * (1 - SCORE_SMOOTHING) + rawExpr * SCORE_SMOOTHING;
         }
+        // When referenceActive but user silent — all three EMAs hold.
+        // When referenceActive=false (instrumental) — all three EMAs hold.
+
+        // Update for next frame's history push gating
+        prevReferenceActiveRef.current = referenceActive;
 
         // ── Permanent diagnostic logging (standing requirement) ─────────────
         frameCount++;
@@ -1022,22 +1027,19 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
             refActive: referenceActive,
             refVol: refVolume.toFixed(4),
             pitchFrames: pitchFramesRef.current,
-            missedFrames: missedFramesRef.current,
-            missRatioPct: (missRatio * 100).toFixed(1),
+            voicedFrames: voicedFramesRef.current,
+            completionPct: (completionRatio * 100).toFixed(1),
             pitch: smoothPitchRef.current.toFixed(1),
             rhythm: smoothRhythmRef.current.toFixed(1),
-            tech: smoothTechRef.current.toFixed(1),
+            expr: smoothTechRef.current.toFixed(1),
             refCtxState: refAudioCtxRef.current?.state ?? 'null',
             userCtxState: userAudioCtxRef.current?.state ?? 'null',
           });
         }
 
         const newMetrics: VocalsComparisonMetrics = {
-          // NOT clamped to a 0 floor (unlike rhythm/technique below) --
-          // negative marking on missed frames needs to actually reach
-          // Sing.tsx's final score averaging. Upper bound still capped at
-          // 100 defensively (no per-frame contribution ever exceeds 100).
-          pitchMatch: Math.min(100, Math.round(smoothPitchRef.current)),
+          // All three clamped 0–100 — purely additive system, no negatives
+          pitchMatch: clamp100(Math.round(smoothPitchRef.current)),
           rhythmMatch: clamp100(Math.round(smoothRhythmRef.current)),
           techniqueMatch: clamp100(Math.round(smoothTechRef.current)),
           volume: userVolume,
@@ -1097,7 +1099,14 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
 
     setIsActive(false);
     console.log('[HOOK] stopAnalysis complete. Session totals — pitchFrames:', pitchFramesRef.current,
-      'missedFrames:', missedFramesRef.current,
+      'voicedFrames:', voicedFramesRef.current,
+      'totalRefActiveFrames:', totalRefActiveFramesRef.current,
+      'completion:', totalRefActiveFramesRef.current > 0
+        ? ((voicedFramesRef.current / totalRefActiveFramesRef.current) * 100).toFixed(1) + '%'
+        : 'n/a',
+      'pitch:', smoothPitchRef.current.toFixed(1),
+      'rhythm:', smoothRhythmRef.current.toFixed(1),
+      'expression:', smoothTechRef.current.toFixed(1));
       'pitch:', smoothPitchRef.current.toFixed(1),
       'rhythm:', smoothRhythmRef.current.toFixed(1),
       'tech:', smoothTechRef.current.toFixed(1));
@@ -1108,7 +1117,9 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
   const resetAccumulators = useCallback(() => {
     pitchScoreAccRef.current = 0;
     pitchFramesRef.current = 0;
-    missedFramesRef.current = 0;
+    voicedFramesRef.current = 0;
+    totalRefActiveFramesRef.current = 0;
+    userPitchHistRef.current = [];
     userOnsetsRef.current = [];
     refOnsetsRef.current = [];
     userEnergyHistRef.current = [];
