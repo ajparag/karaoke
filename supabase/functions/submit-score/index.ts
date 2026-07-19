@@ -121,6 +121,23 @@ serve(async (req) => {
     const timingAccuracy = cleanInteger(body.timingAccuracy, 0, 100, 0);
     const rhythmAccuracy = cleanInteger(body.rhythmAccuracy, 0, 100, 0);
 
+    // ── New analytics fields — all optional, non-fatal if missing ────────────
+    // These are stored purely for future scoring calibration and analysis.
+    // They never affect the score itself — just capture the raw signals
+    // that produced it so we can recalibrate constants later.
+    const expressionAccuracy = body.expressionAccuracy != null
+      ? cleanInteger(body.expressionAccuracy, 0, 100, 0) : null;
+    const completionRatio = (body.completionRatio != null && Number.isFinite(Number(body.completionRatio)))
+      ? Math.max(0, Math.min(1, Number(body.completionRatio))) : null;
+    const voicedFrames = body.voicedFrames != null
+      ? cleanInteger(body.voicedFrames, 0, 1_000_000, 0) : null;
+    const refActiveFrames = body.refActiveFrames != null
+      ? cleanInteger(body.refActiveFrames, 0, 1_000_000, 0) : null;
+    const noiseFloor = (body.noiseFloor != null && Number.isFinite(Number(body.noiseFloor)))
+      ? Math.max(0, Math.min(1, Number(body.noiseFloor))) : null;
+    const trackSource = cleanText(body.trackSource, 20) || null;
+    const trackLanguage = cleanText(body.trackLanguage, 50) || null;
+
     // x-forwarded-for is the standard header for the originating client IP
     // behind Supabase's edge runtime proxy; first entry is the real client.
     const forwardedFor = req.headers.get("x-forwarded-for");
@@ -159,6 +176,13 @@ serve(async (req) => {
         city,
         ip_address: userId ? null : clientIp,
         stage_id: stageId,
+        expression_accuracy: expressionAccuracy,
+        completion_ratio: completionRatio,
+        voiced_frames: voicedFrames,
+        ref_active_frames: refActiveFrames,
+        noise_floor: noiseFloor,
+        track_source: trackSource,
+        track_language: trackLanguage,
       })
       .select("id")
       .single();
