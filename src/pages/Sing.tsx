@@ -480,7 +480,13 @@ const Sing = () => {
     if (!audio || !separatedAudio?.vocalsUrl) return;
     if (isPlaying && vocalsEnabled) {
       if (audioRef.current) audio.currentTime = audioRef.current.currentTime;
-      audio.play().catch(console.error);
+      // Ignore AbortError — it just means pause() was called before play() finished
+      // Ignore NotAllowedError — vocals are supplementary, main audio still plays
+      audio.play().catch(err => {
+        if ((err as any)?.name !== 'AbortError' && (err as any)?.name !== 'NotAllowedError') {
+          console.warn('[vocals] play() failed:', (err as any)?.name);
+        }
+      });
     } else {
       audio.pause();
     }
@@ -569,17 +575,47 @@ const Sing = () => {
     setShowPauseCheckpoint(false);
     setShowExitConfirm(false);
 
+    // If the audio context is suspended (common after pause on mobile),
+    // it must be resumed before play() will succeed.
+    // This silently fails on browsers that don't support AudioContext — non-fatal.
+    try {
+      const ctx = (audio as any)._audioCtx;
+      if (ctx?.state === 'suspended') await ctx.resume();
+    } catch { /* non-fatal */ }
+
     try {
       await audio.play();
     } catch (err) {
       const name = (err as any)?.name;
-      toast({
-        title: name === 'NotAllowedError' ? 'Playback blocked' : 'Playback failed',
-        description: name === 'NotAllowedError'
-          ? 'Tap Play again (browser requires a direct user action).'
-          : 'Unable to start playback. Try another song.',
-        variant: 'destructive',
-      });
+
+      // AbortError: play() was interrupted by pause() or another play() call
+      // before it completed. This is not a real error — just retry once.
+      if (name === 'AbortError') {
+        try { await audio.play(); } catch { /* give up silently */ }
+        return;
+      }
+
+      // NotAllowedError: browser blocked autoplay — user must tap again
+      if (name === 'NotAllowedError') {
+        toast({ title: 'Playback blocked', description: 'Tap Play again (browser requires a direct user action).', variant: 'destructive' });
+        return;
+      }
+
+      // InvalidStateError: audio element is in a broken state (e.g. src was
+      // revoked). Reload the src and retry.
+      if (name === 'InvalidStateError' || name === 'NotSupportedError') {
+        try {
+          const src = audio.src;
+          audio.load();
+          audio.src = src;
+          await audio.play();
+        } catch {
+          toast({ title: 'Playback failed', description: 'Unable to resume. Try restarting the song.', variant: 'destructive' });
+        }
+        return;
+      }
+
+      toast({ title: 'Playback failed', description: 'Unable to start playback. Try another song.', variant: 'destructive' });
       return;
     }
 
