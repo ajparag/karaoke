@@ -49,13 +49,13 @@ class ErrorBoundary extends Component<
 }
 
 const App = () => {
-  // NOTE: warmUpHFSpace() is intentionally NOT called here. This effect
+  // NOTE: warmUpModal() is intentionally NOT called here. This effect
   // used to ping Modal on every single page load/visit -- homepage,
   // leaderboard, auth, everywhere -- burning GPU idle time for visitors
   // who never search or sing at all. Warmup now happens ONLY from
-  // Index.tsx's handleSearch(), i.e. the moment someone actually clicks
-  // search or presses Enter -- the earliest point we know they intend to
-  // pick a song.
+  // Index.tsx's handleSelectTrack(), i.e. the moment someone actually
+  // selects a song -- the earliest point we know they intend to sing,
+  // and only when the song is not already in the IndexedDB cache.
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
