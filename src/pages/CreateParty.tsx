@@ -138,11 +138,20 @@ export default function CreateParty() {
               </Button>
             </div>
           ) : (
-            <Link to="/auth" state={{ from: '/party/host' }}>
-              <Button className="w-full gradient-primary text-primary-foreground h-11">
-                Sign in to host
-              </Button>
-            </Link>
+            <div className="space-y-3">
+              <p className="text-xs text-center text-muted-foreground bg-muted/50 rounded-xl p-3">
+                You'll be brought right back here after signing in — your party setup won't be lost.
+              </p>
+              <Link
+                to="/auth"
+                state={{ from: '/party/host' }}
+                onClick={() => sessionStorage.setItem('authRedirectTo', '/party/host')}
+              >
+                <Button className="w-full gradient-primary text-primary-foreground h-11">
+                  Sign in to host
+                </Button>
+              </Link>
+            </div>
           )}
         </div>
       </div>
