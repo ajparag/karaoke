@@ -376,29 +376,38 @@ const Sing = () => {
     audio.addEventListener('canplay', () => markReady('canplay'));
     audio.addEventListener('loadedmetadata', () => markReady('loadedmetadata'));
 
-    audio.addEventListener('progress', () => {
-      if (!audio.buffered.length) return;
-      // Cache stems once fully buffered — background, non-blocking
-      if (
-        !cachingTriggeredRef.current &&
-        audio.duration > 0 &&
-        audio.buffered.end(audio.buffered.length - 1) >= audio.duration - 1 &&
-        separatedAudio && !separatedAudio.fromCache && track?.id
-      ) {
-        cachingTriggeredRef.current = true;
-        const instUrl = separatedAudio.instrumentalUrl;
-        const vocUrl = separatedAudio.vocalsUrl;
-        const key = track.id;
-        (async () => {
-          try {
-            const instBlob = await fetch(instUrl).then(r => r.blob());
-            const vocBlob = vocUrl ? await fetch(vocUrl).then(r => r.blob()) : undefined;
-            await saveCachedTracks(key, instBlob, vocBlob);
-            console.log('[Cache] Saved stems for', key);
-          } catch (e) { console.warn('[Cache] Failed (non-fatal):', e); }
-        })();
+  // ── Cache stems immediately after separation completes ─────────────────────
+  // Previously triggered by the audio 'progress' event (when buffered.end >=
+  // duration). This was unreliable — Modal streaming URLs may not have a
+  // Content-Length header, so audio.duration stays Infinity/NaN and the
+  // progress condition never fires. The stems are already on Modal's servers
+  // the moment separatedAudio arrives — just fetch and save them immediately.
+  useEffect(() => {
+    if (!separatedAudio || separatedAudio.fromCache || !track?.id) return;
+    if (cachingTriggeredRef.current) return;
+    cachingTriggeredRef.current = true;
+
+    const instUrl = separatedAudio.instrumentalUrl;
+    const vocUrl = separatedAudio.vocalsUrl;
+    const key = track.id;
+
+    (async () => {
+      try {
+        console.log('[Cache] Separation complete — fetching stems for IndexedDB');
+        const instBlob = await fetch(instUrl).then(r => r.blob());
+        if (instBlob.size < 10 * 1024) {
+          console.warn('[Cache] Instrumental blob too small, skipping cache');
+          return;
+        }
+        const vocBlob = vocUrl ? await fetch(vocUrl).then(r => r.blob()) : undefined;
+        await saveCachedTracks(key, instBlob, vocBlob);
+        console.log('[Cache] Saved stems for', key, '—', Math.round(instBlob.size / 1024), 'KB');
+      } catch (e) {
+        console.warn('[Cache] Background caching failed (non-fatal):', e);
+        cachingTriggeredRef.current = false; // allow retry
       }
-    });
+    })();
+  }, [separatedAudio, track?.id]);
 
     audio.addEventListener('timeupdate', () => {
       if (!isMounted) return;
