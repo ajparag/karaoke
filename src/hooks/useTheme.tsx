@@ -14,7 +14,7 @@
 // so the whole app respects one consistent theme choice everywhere.
 // =============================================================================
 
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 
 interface ThemeContextValue {
   isDark: boolean;
@@ -23,33 +23,102 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
+function getSystemPrefersDark(): boolean {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch {
+    return true; // matchMedia unavailable — default to dark
+  }
+}
+
+// =============================================================================
+// v2 -- Added system theme (prefers-color-scheme) support.
+//
+// Priority order:
+//   1. An explicit choice the user made by tapping the toggle (saved in
+//      localStorage) always wins — the app never overrides a deliberate pick.
+//   2. If the user has never toggled it, the app follows the OS-level dark/
+//      light setting, and keeps following it live if the user changes their
+//      OS theme while the app is open (e.g. switches at sunset via their
+//      phone's auto dark mode).
+//   3. If matchMedia is unavailable (very old browser), falls back to dark
+//      by default rather than light.
+// =============================================================================
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [isDark, setIsDark] = useState(() => {
     try {
-      return localStorage.getItem('theme') === 'dark';
+      const stored = localStorage.getItem('theme');
+      if (stored === 'dark') return true;
+      if (stored === 'light') return false;
+      // No explicit choice yet — follow the OS setting.
+      return getSystemPrefersDark();
     } catch {
-      return false;
+      return true; // localStorage unavailable — default to dark
     }
   });
 
-  // Apply immediately on mount (app load) and whenever it changes --
-  // this runs at the App root, so it's consistent no matter which page
-  // the user lands on first.
+  // Tracks whether the CURRENT value came from an explicit user choice.
+  // A ref (not state) so the live system-theme listener below can check
+  // it synchronously without needing to re-subscribe — the moment
+  // toggleTheme fires, this flips to true and the listener becomes a
+  // permanent no-op for the rest of the session, even though it's still
+  // technically attached.
+  const explicitRef = useRef<boolean>((() => {
+    try {
+      const stored = localStorage.getItem('theme');
+      return stored === 'dark' || stored === 'light';
+    } catch {
+      return false;
+    }
+  })());
+
+  // Live-follow the OS theme setting for as long as explicitRef is false.
+  // Runs once on mount; the explicitRef check inside the handler (not the
+  // effect setup) is what actually gates whether a system change applies —
+  // this way a mid-session toggle correctly stops future system changes
+  // from taking over, without needing to tear down and rebuild the listener.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (e: MediaQueryListEvent) => {
+      if (explicitRef.current) return; // user has made their own choice — ignore OS changes
+      setIsDark(e.matches);
+    };
+
+    mql.addEventListener?.('change', handleChange);
+    return () => mql.removeEventListener?.('change', handleChange);
+  }, []);
+
+  // Apply to the DOM on every change, regardless of source (explicit toggle
+  // or system-follow). This does NOT persist to localStorage — persistence
+  // only happens in toggleTheme, so a system-driven change is never
+  // mistaken for a deliberate user choice on the next visit.
   useEffect(() => {
     if (isDark) {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
-    try {
-      localStorage.setItem('theme', isDark ? 'dark' : 'light');
-    } catch {
-      // localStorage unavailable (private browsing etc.) -- non-fatal,
-      // theme just won't persist across sessions.
-    }
   }, [isDark]);
 
-  const toggleTheme = () => setIsDark((d) => !d);
+  // toggleTheme is the ONLY place that writes to localStorage — this is
+  // what marks the choice as explicit and makes it stick on future visits,
+  // overriding the system-follow behaviour from here on.
+  const toggleTheme = () => {
+    explicitRef.current = true; // from now on, ignore live OS theme changes
+    setIsDark((d) => {
+      const next = !d;
+      try {
+        localStorage.setItem('theme', next ? 'dark' : 'light');
+      } catch {
+        // localStorage unavailable (private browsing etc.) -- non-fatal,
+        // the toggle still works for this session, just won't persist.
+      }
+      return next;
+    });
+  };
 
   return (
     <ThemeContext.Provider value={{ isDark, toggleTheme }}>
