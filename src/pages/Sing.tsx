@@ -168,6 +168,15 @@ const Sing = () => {
   const [showPauseCheckpoint, setShowPauseCheckpoint] = useState(false);
   const [scoreSaveStatus, setScoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const [guestName, setGuestName] = useState('');
+  // Party context — parsed once on mount. When singing as part of a party,
+  // the "signed-in user" is almost always the HOST, not the person actually
+  // singing (everyone sings from the host's one device). So in party mode
+  // we always need an explicit name for the singer, regardless of whether
+  // the host is signed in. Pre-filled with the name they queued the song
+  // under (singer_name from stage_queue), editable in case it's wrong.
+  const [partyContext, setPartyContext] = useState<{
+    code?: string; queueId?: string; singerName?: string; stageId?: string;
+  } | null>(null);
   const [vocalsVolume, setVocalsVolume] = useState(40);
   const [vocalsEnabled, setVocalsEnabled] = useState(true);
   const [separationStartedAt, setSeparationStartedAt] = useState<number | null>(null);
@@ -282,6 +291,19 @@ const Sing = () => {
     if (!stored) { navigate('/'); return; }
     const parsed: Track = JSON.parse(stored);
     setTrack(parsed);
+
+    // Party context — read once here (not re-parsed at submission time).
+    // Pre-fill guestName with the singer's name from the queue so the field
+    // isn't empty, but it stays fully editable if the host mis-typed it or
+    // is now singing a different person's queued song.
+    const partyRaw = sessionStorage.getItem('activePartyContext');
+    if (partyRaw) {
+      try {
+        const partyParsed = JSON.parse(partyRaw);
+        setPartyContext(partyParsed);
+        if (partyParsed?.singerName) setGuestName(partyParsed.singerName);
+      } catch { /* non-fatal — party mode name input still shows, just empty */ }
+    }
 
     const prefetched = sessionStorage.getItem('prefetchedLyrics');
     if (prefetched) {
@@ -681,15 +703,19 @@ const Sing = () => {
       const avgFlow = Math.max(0, count > 0 ? flow / count : 0);
       const scoreRating = totalScore >= 900 ? 'L' : totalScore >= 800 ? 'S' : totalScore >= 700 ? 'A'
         : totalScore >= 600 ? 'B' : totalScore >= 500 ? 'C' : totalScore >= 300 ? 'D' : 'F';
-      const displayName = (user && !user.is_anonymous)
-        ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
-        : (guestName.trim() || 'Guest');
 
-      const partyContextRaw = sessionStorage.getItem('activePartyContext');
-      let stageId: string | null = null;
-      if (partyContextRaw) {
-        try { stageId = JSON.parse(partyContextRaw)?.stageId ?? null; } catch { /* non-fatal */ }
-      }
+      // In party mode, always use the entered/pre-filled singer name —
+      // NEVER the host's own signed-in identity. Everyone sings from the
+      // host's one device, so "user is signed in" tells us nothing about
+      // who's actually performing right now.
+      const isPartyMode = !!partyContext;
+      const displayName = isPartyMode
+        ? (guestName.trim() || partyContext?.singerName || 'Guest')
+        : (user && !user.is_anonymous)
+          ? (user.user_metadata?.username || user.user_metadata?.full_name || 'Singer')
+          : (guestName.trim() || 'Guest');
+
+      const stageId = partyContext?.stageId ?? null;
 
       const { error } = await supabase.functions.invoke('submit-score', {
         body: {
@@ -717,22 +743,26 @@ const Sing = () => {
       if (error) throw error;
       setScoreSaveStatus('saved');
 
-      if (partyContextRaw) {
+      if (partyContext?.queueId) {
         try {
-          const { queueId } = JSON.parse(partyContextRaw);
-          if (queueId) await supabase.from('stage_queue').update({ status: 'completed', score: totalScore, rating: scoreRating }).eq('id', queueId);
+          await supabase.from('stage_queue').update({ status: 'completed', score: totalScore, rating: scoreRating }).eq('id', partyContext.queueId);
         } catch { /* non-fatal */ }
       }
     } catch (err) {
       console.error('[Score] Submit failed:', err);
       setScoreSaveStatus('failed');
     }
-  }, [track, user, guestName, totalScore, duration, currentTime]);
+  }, [track, user, guestName, partyContext, totalScore, duration, currentTime]);
 
-  // Auto-save on song completion
+  // Auto-save on song completion.
+  // Signed-in users normally auto-save instantly (their identity is trusted).
+  // But in party mode that trust doesn't apply — the signed-in user is the
+  // HOST, not necessarily who's singing. Give the same 5s grace period as
+  // anonymous users so there's a chance to fix a wrong/missing singer name
+  // before it's locked into the leaderboard.
   useEffect(() => {
     if (!showResults || autoSaveTriggeredRef.current) return;
-    if (user) {
+    if (user && !partyContext) {
       autoSaveTriggeredRef.current = true;
       submitScoreToLeaderboard();
     } else {
@@ -741,7 +771,7 @@ const Sing = () => {
       }, 5000);
       return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
     }
-  }, [showResults, submitScoreToLeaderboard, user]);
+  }, [showResults, submitScoreToLeaderboard, user, partyContext]);
 
   const handleManualSubmit = useCallback(() => {
     if (autoSaveTriggeredRef.current) return;
@@ -781,13 +811,10 @@ const Sing = () => {
   }, []);
 
   const handleNextClick = useCallback(() => {
-    const raw = sessionStorage.getItem('activePartyContext');
     sessionStorage.removeItem('activePartyContext');
-    if (raw) {
-      try { const { code } = JSON.parse(raw); if (code) { navigate(`/party/${code}/stage`); return; } } catch { /* fall through */ }
-    }
+    if (partyContext?.code) { navigate(`/party/${partyContext.code}/stage`); return; }
     navigate('/');
-  }, [navigate]);
+  }, [navigate, partyContext]);
 
   // ── Share score card ────────────────────────────────────────────────────────
   const rating = getRating(totalScore);
@@ -860,12 +887,19 @@ const Sing = () => {
       ? "You're doing great! Let's continue"
       : "Keep going, you've got this!";
 
-  // ── Guest name input (anonymous users) ──────────────────────────────────────
-  const guestNameInput = !user && scoreSaveStatus === 'idle' ? (
-    <div className="mb-4 flex items-center justify-center">
+  // ── Singer name input ─────────────────────────────────────────────────────
+  // Shows whenever we can't trust the signed-in user's identity as the
+  // singer: either nobody is signed in, OR we're in party mode (host's own
+  // account is irrelevant — everyone sings from the host's one device).
+  const needsNameInput = !user || !!partyContext;
+  const guestNameInput = needsNameInput && scoreSaveStatus === 'idle' ? (
+    <div className="mb-4 flex flex-col items-center gap-1">
+      {partyContext && (
+        <p className="text-xs text-muted-foreground">Who's singing?</p>
+      )}
       <input
         type="text"
-        placeholder="Enter your name (optional)"
+        placeholder={partyContext ? 'Singer name' : 'Enter your name (optional)'}
         value={guestName}
         onChange={e => setGuestName(e.target.value)}
         onFocus={() => { if (autoSaveTimerRef.current) { clearTimeout(autoSaveTimerRef.current); autoSaveTimerRef.current = null; } }}
@@ -940,7 +974,7 @@ const Sing = () => {
               </Button>
             </div>
             <Button variant="ghost" size="sm" className="mt-3" onClick={handleNextClick}>
-              {sessionStorage.getItem('activePartyContext') ? 'Back to stage' : 'Done'}
+              {partyContext ? 'Back to stage' : 'Done'}
             </Button>
           </div>
         </div>
