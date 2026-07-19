@@ -675,6 +675,20 @@ const Sing = () => {
           timingAccuracy: Math.round(avgAcc), rhythmAccuracy: Math.round(avgFlow),
           durationSeconds: Math.round(duration), playedSeconds: Math.round(currentTime),
           thumbnailUrl: track.thumbnail, displayName, stageId,
+          // ── Analytics telemetry — for future scoring calibration ───────────
+          // These fields are stored but never affect the score displayed to
+          // the user. They let us recalibrate constants from real data later.
+          expressionAccuracy: count > 0 ? Math.round(scoreAccumulatorRef.current.expression / count) : 0,
+          completionRatio: metrics.refActiveFrames > 0
+            ? Math.round((metrics.voicedFrames / metrics.refActiveFrames) * 1000) / 1000
+            : null,
+          voicedFrames: metrics.voicedFrames,
+          refActiveFrames: metrics.refActiveFrames,
+          noiseFloor: metrics.noiseFloorSnapshot > 0
+            ? Math.round(metrics.noiseFloorSnapshot * 10000) / 10000
+            : null,
+          trackSource: track.source,
+          trackLanguage: track.language ?? null,
         },
       });
       if (error) throw error;
