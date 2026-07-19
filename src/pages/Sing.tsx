@@ -229,6 +229,18 @@ const Sing = () => {
   useEffect(() => { setAudioSessionType('play-and-record'); }, []);
 
   // ── MediaSession API ────────────────────────────────────────────────────────
+  // MediaSession does NOT support volumechange — the spec deliberately excludes
+  // it (volume is OS-level, not web-level). However, Android Chrome only routes
+  // hardware volume keys to the correct audio stream (STREAM_MUSIC) when it
+  // recognises an ACTIVE media session. The key signals are:
+  //   1. metadata set (title, artist, artwork)
+  //   2. playbackState = 'playing'
+  //   3. setPositionState() called with current duration + position
+  //   4. play/pause action handlers registered
+  //
+  // Without setPositionState(), Chrome may not fully claim audio focus, causing
+  // Android to route volume keys to the ringer stream instead of media.
+  // setPositionState only fires on meaningful state changes (not every RAF frame).
   useEffect(() => {
     if (!('mediaSession' in navigator) || !track) return;
     try {
@@ -239,10 +251,30 @@ const Sing = () => {
         artwork: track.thumbnail ? [{ src: track.thumbnail, sizes: '512x512', type: 'image/jpeg' }] : [],
       });
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+
+      // setPositionState tells Android exactly where we are in the track.
+      // Only update on play/pause/track/duration changes, not every frame.
+      if (duration > 0) {
+        try {
+          navigator.mediaSession.setPositionState({
+            duration,
+            playbackRate: 1,
+            position: Math.min(audioRef.current?.currentTime ?? 0, duration),
+          });
+        } catch { /* setPositionState not supported on all browsers */ }
+      }
+
+      // Register play/pause handlers so Android lock screen controls work
+      navigator.mediaSession.setActionHandler('play', () => {
+        audioRef.current?.play().catch(() => {});
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        audioRef.current?.pause();
+      });
     } catch (e) {
       console.warn('[audio] MediaSession sync failed:', e);
     }
-  }, [track, isPlaying]);
+  }, [track, isPlaying, duration]); // intentionally excludes currentTime
 
   // ── Load track + lyrics from sessionStorage ─────────────────────────────────
   useEffect(() => {
@@ -793,17 +825,6 @@ const Sing = () => {
           <h1 className="font-semibold text-sm truncate">{track?.title || 'Loading...'}</h1>
           <p className="text-xs text-muted-foreground truncate">{track?.artist}</p>
         </div>
-        {separatedAudio && (
-          <Button
-            variant={vocalsEnabled ? 'default' : 'outline'}
-            size="sm"
-            onClick={toggleVocals}
-            className={`shrink-0 text-xs h-7 px-3 rounded-full ${vocalsEnabled ? 'bg-primary hover:bg-primary/90' : ''}`}
-          >
-            <VocalsIcon className="w-3 h-3 mr-1" isActive={vocalsEnabled} />
-            {vocalsEnabled ? `${vocalsVolume}%` : 'Off'}
-          </Button>
-        )}
       </header>
 
       {/* ── Separation wait screen ── */}
