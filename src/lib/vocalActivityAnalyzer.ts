@@ -43,16 +43,11 @@ const MIN_SILENCE_GAP_MS = 500;   // gaps shorter than this are merged (breathin
  * @param vocalsUrl - URL of the separated vocals FLAC/audio file
  * @returns Array of { start, end } intervals in seconds, or null on failure
  */
-export async function analyzeVocalActivity(vocalsUrl: string): Promise<VocalInterval[] | null> {
+// Core analysis — accepts a pre-fetched ArrayBuffer.
+// Used directly by Sing.tsx when the vocals blob is already in memory
+// (avoids re-downloading a file that was just fetched for caching).
+export async function analyzeVocalActivityFromBuffer(arrayBuffer: ArrayBuffer): Promise<VocalInterval[] | null> {
   try {
-    console.log('[VocalAnalysis] Fetching vocals stem for offline analysis...');
-    const resp = await fetch(vocalsUrl);
-    if (!resp.ok) {
-      console.warn('[VocalAnalysis] Fetch failed:', resp.status);
-      return null;
-    }
-
-    const arrayBuffer = await resp.arrayBuffer();
     console.log('[VocalAnalysis] Decoding audio buffer...', Math.round(arrayBuffer.byteLength / 1024), 'KB');
 
     const Ctx = window.AudioContext || (window as any).webkitAudioContext;
@@ -65,14 +60,13 @@ export async function analyzeVocalActivity(vocalsUrl: string): Promise<VocalInte
     const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
     offlineCtx.close().catch(() => {});
 
-    const channelData = audioBuffer.getChannelData(0); // mono or first channel
+    const channelData = audioBuffer.getChannelData(0);
     const sampleRate = audioBuffer.sampleRate;
     const windowSize = Math.round(sampleRate * WINDOW_MS / 1000);
     const minSilenceSamples = Math.round(sampleRate * MIN_SILENCE_GAP_MS / 1000);
 
     console.log('[VocalAnalysis] Scanning', audioBuffer.duration.toFixed(1), 's of audio at', sampleRate, 'Hz...');
 
-    // Pass 1: compute RMS for each window and mark as active/silent
     const windowCount = Math.ceil(channelData.length / windowSize);
     const isActive = new Uint8Array(windowCount);
 
@@ -129,6 +123,22 @@ export async function analyzeVocalActivity(vocalsUrl: string): Promise<VocalInte
     return intervals;
   } catch (e) {
     console.warn('[VocalAnalysis] Analysis failed (non-fatal, highlight will use fallback):', e);
+    return null;
+  }
+}
+
+// URL-based wrapper — fetches the vocals stem then delegates to the buffer-based function.
+// Used as a fallback when the vocals blob isn't already in memory
+// (e.g. when playing from IndexedDB cache where we didn't re-fetch).
+export async function analyzeVocalActivity(vocalsUrl: string): Promise<VocalInterval[] | null> {
+  try {
+    console.log('[VocalAnalysis] Fetching vocals stem for offline analysis...');
+    const resp = await fetch(vocalsUrl);
+    if (!resp.ok) { console.warn('[VocalAnalysis] Fetch failed:', resp.status); return null; }
+    const arrayBuffer = await resp.arrayBuffer();
+    return analyzeVocalActivityFromBuffer(arrayBuffer);
+  } catch (e) {
+    console.warn('[VocalAnalysis] Fetch failed (non-fatal):', e);
     return null;
   }
 }
