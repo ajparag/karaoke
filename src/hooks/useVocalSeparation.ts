@@ -139,7 +139,10 @@ interface InFlightSeparation {
 }
 const separationPromiseCache = new Map<string, InFlightSeparation>();
 
-export async function warmUpHFSpace(): Promise<void> {
+// warmUpModal — pings the Modal container via the Supabase edge function
+// to reduce cold-start latency. Called from Index.tsx when the user selects
+// a song and the track is not already in IndexedDB cache.
+export async function warmUpModal(): Promise<void> {
   // Re-ping if warmup is stale (container may have gone cold after idle timeout)
   if (lastWarmupTs > 0 && Date.now() - lastWarmupTs < WARMUP_STALE_MS) return;
   if (warmUpPromise) return warmUpPromise;
@@ -174,11 +177,7 @@ export async function warmUpHFSpace(): Promise<void> {
   return warmUpPromise;
 }
 
-// warmUpModal is the canonical name going forward.
-// warmUpHFSpace kept as an alias for backward compatibility — both point to
-// the same function. Rename callers to warmUpModal at your convenience;
-// warmUpHFSpace will be removed in a future cleanup pass.
-export const warmUpModal = warmUpHFSpace;
+
 
 // =============================================================================
 // SEPARATION HOOK
