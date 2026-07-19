@@ -151,6 +151,10 @@ export interface VocalsComparisonMetrics {
   volume: number;            // current user mic volume (raw)
   isVoiceDetected: boolean;
   referenceActive: boolean;  // is the reference vocal track currently audible
+  // ── Analytics fields — exposed for score submission telemetry ────────────
+  voicedFrames: number;      // frames where user voice was detected
+  refActiveFrames: number;   // total reference-active frames (denominator for completion)
+  noiseFloorSnapshot: number; // noise floor at time of metrics update
   debug?: {
     voiceThreshold: number;
     noiseFloor: number;
@@ -1045,6 +1049,10 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
           volume: userVolume,
           isVoiceDetected,
           referenceActive,
+          // Analytics — snapshotted each frame for score submission telemetry
+          voicedFrames: voicedFramesRef.current,
+          refActiveFrames: totalRefActiveFramesRef.current,
+          noiseFloorSnapshot: noiseFloorRef.current,
           debug: {
             voiceThreshold,
             noiseFloor: noiseFloorRef.current,
@@ -1132,6 +1140,7 @@ export function useVocalsComparison(options: UseVocalsComparisonOptions = {}) {
     setMetrics({
       pitchMatch: 0, rhythmMatch: 0, techniqueMatch: 0,
       volume: 0, isVoiceDetected: false, referenceActive: false,
+      voicedFrames: 0, refActiveFrames: 0, noiseFloorSnapshot: 0,
     });
   }, []);
 
