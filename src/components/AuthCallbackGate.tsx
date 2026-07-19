@@ -1,22 +1,29 @@
 // =============================================================================
 // CHANGELOG
-// v1 -- NEW. Fixes the "briefly flashes 404 then redirects home" bug seen
-//   after Google OAuth sign-in.
+// v1 -- Fixes the "briefly flashes 404 then redirects home" bug seen after
+//   Google OAuth sign-in. Detects an in-flight OAuth callback (hash contains
+//   'access_token=') BEFORE mounting HashRouter, waits for Supabase to
+//   confirm the session, then mounts the real router.
 //
-// Root cause: this app uses HashRouter (routes live after '#'), but
-// Supabase's OAuth redirect ALSO appends the session token after '#'
-// (e.g. "https://karaokeparty.in/#access_token=..."). React Router tries
-// to match "access_token=..." as a route path, finds nothing, and renders
-// the catch-all 404 page for a moment -- then Supabase's own async
-// hash-parsing finishes, fires SIGNED_IN, and the app navigates to '/',
-// clearing the URL. Both systems are fighting over the same '#'.
+// v2 -- CURRENT: Fixes a second bug this exposed — after Google OAuth, the
+//   user ALWAYS landed on '/' regardless of which page they started from
+//   (e.g. clicking "Sign in to host" from /party/host).
 //
-// Fix: detect an in-flight OAuth callback (hash contains 'access_token=')
-// BEFORE mounting HashRouter at all. Show a lightweight "Signing you
-// in..." screen instead, and only mount the real router once Supabase
-// has confirmed the session (or a short safety timeout elapses). This
-// means React Router never sees the malformed hash as a route to match,
-// so there's nothing to 404 on.
+//   Root cause: Google's redirectTo is anchored to window.location.origin
+//   + '/' (required — see Auth.tsx's own changelog for why). Supabase then
+//   appends the session token to the URL hash on return. Auth.tsx's
+//   sessionStorage-based "return to where I came from" logic only runs
+//   if Auth.tsx itself mounts — but after this round-trip, the hash never
+//   contains '/auth' again, so Auth.tsx never re-mounts and that logic
+//   never fires. HashRouter always ends up showing '/' (Index).
+//
+//   Fix: this component is the ONE place guaranteed to run after every
+//   OAuth round-trip, regardless of entry page (it's above HashRouter).
+//   Once the session is confirmed, if a redirect target was stashed in
+//   sessionStorage (set synchronously on click by whichever page sent the
+//   user to /auth), write it directly into window.location.hash BEFORE
+//   HashRouter mounts. HashRouter then renders that route on first paint
+//   instead of defaulting to '/'.
 // =============================================================================
 
 import { useEffect, useState, ReactNode } from "react";
@@ -37,6 +44,20 @@ export function AuthCallbackGate({ children }: { children: ReactNode }) {
     const finish = () => {
       if (settled) return;
       settled = true;
+
+      // Redirect to wherever the user was headed before Google OAuth took
+      // over the page (e.g. "/party/host"). Must happen BEFORE setReady(true)
+      // mounts HashRouter, so the router's first render already matches the
+      // right route — no flash of Index, no extra navigation needed.
+      try {
+        const target = sessionStorage.getItem('authRedirectTo');
+        if (target) {
+          sessionStorage.removeItem('authRedirectTo');
+          const path = target.startsWith('/') ? target : `/${target}`;
+          window.location.hash = path;
+        }
+      } catch { /* sessionStorage unavailable — falls back to default '/' */ }
+
       setReady(true);
     };
 
