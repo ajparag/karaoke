@@ -43,6 +43,7 @@ const JoinParty   = lazy(() => import("./pages/JoinParty"));
 const PartyStage  = lazy(() => import("./pages/PartyStage"));
 const PartyQueue  = lazy(() => import("./pages/PartyQueue"));
 const NotFound    = lazy(() => import("./pages/NotFound"));
+const PrivacyPolicy = lazy(() => import("./pages/PrivacyPolicy"));
 
 // Minimal loading fallback — shown while a lazy chunk downloads.
 // Intentionally plain: the page's own UI takes over as soon as it's ready.
@@ -102,6 +103,7 @@ const App = () => (
                 <Route path="/party/:code/stage"   element={<PartyStage />} />
                 <Route path="/party/:code/queue"   element={<PartyQueue />} />
                 <Route path="*"                    element={<NotFound />} />
+                <Route path="/privacy"             element={<PrivacyPolicy />} />
               </Routes>
             </Suspense>
           </HashRouter>
