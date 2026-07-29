@@ -50,8 +50,7 @@ jobs:
 
       - name: Decode Android Keystore
         run: |
-          mkdir -p /home/runner/.gradle/daemon/8.14.3
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > /home/runner/.gradle/daemon/8.14.3/release.keystore
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
 
       - name: Decode keystore
         run: |
