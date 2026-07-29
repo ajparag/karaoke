@@ -48,6 +48,10 @@ jobs:
       - name: Sync Capacitor Android platform
         run: npx cap sync android
 
+      - name: Decode Android Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > /home/runner/.gradle/daemon/8.14.3/release.keystore
+
       - name: Decode keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
