@@ -1,0 +1,78 @@
+# =============================================================================
+# .github/workflows/android-release.yml
+# =============================================================================
+# Destination: .github/workflows/android-release.yml
+#
+# Builds a signed Android App Bundle (.aab) ready for Play Store upload.
+# Triggered manually, or by pushing a tag like "android-v1.0.0".
+#
+# Required GitHub repo secrets (Settings -> Secrets and variables -> Actions):
+#   ANDROID_KEYSTORE_BASE64   -- base64-encoded contents of your .keystore file
+#   ANDROID_KEYSTORE_PASSWORD -- the keystore password you set with keytool
+#   ANDROID_KEY_ALIAS         -- the -alias value you used with keytool
+#   ANDROID_KEY_PASSWORD      -- the key password (often same as store password)
+#
+# See the keystore generation instructions for exact keytool command.
+# =============================================================================
+
+name: Build Android Release AAB
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'android-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build web app
+        run: bun run build
+
+      - name: Sync Capacitor Android platform
+        run: npx cap sync android
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
+
+      - name: Build signed AAB
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease \
+            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.password="$ANDROID_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$ANDROID_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$ANDROID_KEY_PASSWORD"
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f android/app/release.keystore
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: karaokeparty-release-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 30
