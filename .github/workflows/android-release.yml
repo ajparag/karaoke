@@ -48,10 +48,6 @@ jobs:
       - name: Sync Capacitor Android platform
         run: npx cap sync android
 
-      - name: Decode Android Keystore
-        run: |
-          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-
       - name: Decode keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
@@ -64,8 +60,15 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
+          # Use an ABSOLUTE path for the keystore. A relative path here
+          # gets resolved against Gradle's daemon working directory, not
+          # this project's directory -- that mismatch caused:
+          #   "Keystore file '/home/runner/.gradle/daemon/.../release.keystore'
+          #    not found for signing config 'externalOverride'"
+          # even though the file was correctly sitting at app/release.keystore.
+          KEYSTORE_PATH="$(pwd)/app/release.keystore"
           ./gradlew bundleRelease \
-            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
             -Pandroid.injected.signing.store.password="$ANDROID_KEYSTORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$ANDROID_KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$ANDROID_KEY_PASSWORD"
