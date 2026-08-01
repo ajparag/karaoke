@@ -384,6 +384,48 @@ async function searchYouTube(query: string): Promise<Track[]> {
 const searchCache = new Map<string, { tracks: Track[]; ts: number }>();
 const SEARCH_CACHE_TTL_MS = 15 * 60 * 1000;
 
+// MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK: if JioSaavn+Gaana together already
+// return this many results, skip YouTube. YouTube (via yt-dlp) is
+// meaningfully slower than the other two — up to 15s on a genuinely novel
+// query. Shared by both the legacy combined path and the new tiered path
+// below, so the threshold can never drift out of sync between the two.
+const MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK = 5;
+
+// Shared by every search path — dedupes by ID and ranks by the same
+// relevance+popularity scoring, regardless of which source(s) the pool
+// came from. Kept as one function so tier1-only, tier2-only, and the
+// legacy combined path can never silently apply different ranking logic.
+function dedupeAndRank(tracks: Track[], normalizedForCache: string): Track[] {
+  const seen = new Set<string>();
+  const unique: Track[] = [];
+  for (const t of tracks) {
+    if (!seen.has(t.id)) { seen.add(t.id); unique.push(t); }
+  }
+
+  const scored = unique
+    .map(t => ({ t, score: calculateRelevanceScore(normalizedForCache, t) }))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.t.playCount || 0) - (a.t.playCount || 0);
+    });
+
+  console.log('Top 5 results:');
+  scored.slice(0, 5).forEach(({ t, score }) => {
+    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(12)} | ${t.source} | ${t.title} — ${t.artist}`);
+  });
+
+  return scored.map(({ t }) => t);
+}
+
+// =============================================================================
+// LEGACY combined path — UNCHANGED from before this update.
+// Still used whenever the request omits `tier` entirely. Kept fully intact
+// so any caller that hasn't been updated to the new tiered flow (currently:
+// PartyStage.tsx, PartyQueue.tsx) keeps working exactly as it did before —
+// this update is purely additive, nothing about this function's behavior
+// changed.
+// =============================================================================
+
 async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> {
   const normalizedForCache = normalizeQuery(originalQuery);
   const cached = searchCache.get(normalizedForCache);
@@ -395,16 +437,6 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
   const queries = generateAlternativeQueries(originalQuery);
   console.log('Queries:', queries);
 
-  // MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK: if JioSaavn+Gaana together already
-  // return this many results, skip YouTube entirely and respond fast.
-  // YouTube (via yt-dlp) is meaningfully slower than the other two — up to
-  // 15s on a genuinely novel query — and including it in every search was
-  // adding real buffering time for no benefit on the vast majority of
-  // searches where JioSaavn+Gaana already have plenty to show.
-  const MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK = 5;
-
-  // Tier 1 (always): JioSaavn + Gaana in parallel. Both are fast (~1-3s),
-  // so there's no latency cost to always querying both together.
   const [jioSaavnResults, gaanaResults] = await Promise.all([
     (async () => {
       let results = await searchJioSaavn(queries[0]);
@@ -420,9 +452,6 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
   let allTracks = [...jioSaavnResults, ...gaanaResults];
   console.log(`Tier 1 (JioSaavn + Gaana) — JioSaavn: ${jioSaavnResults.length}, Gaana: ${gaanaResults.length}, combined: ${allTracks.length}`);
 
-  // Tier 2 (fallback only): YouTube. Only called when Tier 1 came up thin —
-  // pays the extra latency only on searches that genuinely need it, not
-  // on every single search.
   if (allTracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK) {
     console.log(`Tier 1 combined (${allTracks.length}) below threshold (${MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK}) — falling back to YouTube`);
     const youtubeResults = await searchYouTube(queries[0]);
@@ -430,28 +459,69 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
     allTracks = [...allTracks, ...youtubeResults];
   }
 
-  // Deduplicate by ID
-  const seen = new Set<string>();
-  const unique: Track[] = [];
-  for (const t of allTracks) {
-    if (!seen.has(t.id)) { seen.add(t.id); unique.push(t); }
+  const finalTracks = dedupeAndRank(allTracks, normalizedForCache);
+  searchCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
+  return finalTracks;
+}
+
+// =============================================================================
+// NEW tiered path — lets the client render Tier 1 immediately and fetch
+// Tier 2 separately/later, instead of one call blocking until whichever
+// tier finishes last. Two independent caches so a repeat search is fast
+// on both tiers regardless of whether the client ends up needing tier2.
+// =============================================================================
+
+const tier1Cache = new Map<string, { tracks: Track[]; ts: number }>();
+const tier2Cache = new Map<string, { tracks: Track[]; ts: number }>();
+
+async function searchTier1Only(originalQuery: string): Promise<{ tracks: Track[]; shouldFetchMore: boolean }> {
+  const normalizedForCache = normalizeQuery(originalQuery);
+  const cached = tier1Cache.get(normalizedForCache);
+  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+    console.log('[Tier1] Search cache HIT:', normalizedForCache);
+    return { tracks: cached.tracks, shouldFetchMore: cached.tracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK };
   }
 
-  // Sort by relevance + popularity
-  const scored = unique
-    .map(t => ({ t, score: calculateRelevanceScore(normalizedForCache, t) }))
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return (b.t.playCount || 0) - (a.t.playCount || 0);
-    });
+  const queries = generateAlternativeQueries(originalQuery);
+  console.log('[Tier1] Queries:', queries);
 
-  console.log('Top 5 results:');
-  scored.slice(0, 5).forEach(({ t, score }) => {
-    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(12)} | ${t.source} | ${t.title} — ${t.artist}`);
-  });
+  const [jioSaavnResults, gaanaResults] = await Promise.all([
+    (async () => {
+      let results = await searchJioSaavn(queries[0]);
+      if (results.length < 5 && queries.length > 1) {
+        const remaining = await Promise.all(queries.slice(1).map(q => searchJioSaavn(q)));
+        results = [...results, ...remaining.flat()];
+      }
+      return results;
+    })(),
+    searchGaana(queries[0]),
+  ]);
 
-  const finalTracks = scored.map(({ t }) => t);
-  searchCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
+  const combined = [...jioSaavnResults, ...gaanaResults];
+  console.log(`[Tier1] JioSaavn: ${jioSaavnResults.length}, Gaana: ${gaanaResults.length}, combined: ${combined.length}`);
+
+  const finalTracks = dedupeAndRank(combined, normalizedForCache);
+  tier1Cache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
+
+  return { tracks: finalTracks, shouldFetchMore: finalTracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK };
+}
+
+async function searchTier2Only(originalQuery: string): Promise<Track[]> {
+  const normalizedForCache = normalizeQuery(originalQuery);
+  const cached = tier2Cache.get(normalizedForCache);
+  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+    console.log('[Tier2] Search cache HIT:', normalizedForCache);
+    return cached.tracks;
+  }
+
+  const queries = generateAlternativeQueries(originalQuery);
+  console.log('[Tier2] Calling YouTube for:', queries[0]);
+
+  const youtubeResults = await searchYouTube(queries[0]);
+  console.log(`[Tier2] YouTube returned: ${youtubeResults.length}`);
+
+  const finalTracks = dedupeAndRank(youtubeResults, normalizedForCache);
+  tier2Cache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
   return finalTracks;
 }
 
@@ -461,7 +531,7 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
   try {
-    const { query } = await req.json();
+    const { query, tier } = await req.json();
 
     if (!query || typeof query !== 'string' || !query.trim()) {
       return new Response(
@@ -475,6 +545,32 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: `Query too long (max ${MAX_QUERY_LENGTH} chars)` }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // tier: 'tier1' -> JioSaavn+Gaana only, fast, tells the client whether
+    //   it's worth following up with tier2.
+    // tier: 'tier2' -> YouTube only, called separately by the client after
+    //   rendering tier1, only when tier1 said shouldFetchMore.
+    // tier omitted -> LEGACY single-call combined behavior, byte-identical
+    //   to before this change. Existing callers (PartyStage.tsx,
+    //   PartyQueue.tsx) haven't been updated to the tiered flow yet and
+    //   keep working exactly as they did.
+    if (tier === 'tier1') {
+      const { tracks, shouldFetchMore } = await searchTier1Only(trimmed);
+      console.log(`[Tier1] Returning ${tracks.length} tracks, shouldFetchMore: ${shouldFetchMore}`);
+      return new Response(
+        JSON.stringify({ tracks, shouldFetchMore }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (tier === 'tier2') {
+      const tracks = await searchTier2Only(trimmed);
+      console.log(`[Tier2] Returning ${tracks.length} tracks`);
+      return new Response(
+        JSON.stringify({ tracks }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
