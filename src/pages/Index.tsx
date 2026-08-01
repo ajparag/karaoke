@@ -34,7 +34,6 @@ import { useAuth } from "@/hooks/useAuth";
 import { useTheme } from "@/hooks/useTheme";
 import { useBackGuard } from "@/hooks/useBackGuard";
 import { useVocalSeparation, warmUpModal } from "@/hooks/useVocalSeparation";
-import { getCachedTracks } from "@/lib/audioCache";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -200,20 +199,13 @@ const Index = () => {
         sessionStorage.setItem('prefetchedLyrics', JSON.stringify(result.lyrics));
     }).catch(() => {/* non-fatal */});
 
-    // Check IndexedDB — warm Modal only on cache miss (saves GPU cost)
-    getCachedTracks(track.id).then(cached => {
-      if (!cached) {
-        console.log('[Index] Cache miss — warming Modal for:', track.title);
-        warmUpModal();
-      } else {
-        console.log('[Index] Cache hit — skipping Modal warmup for:', track.title);
-      }
-      // Start separation regardless — hook returns cached result instantly on hit
-      separateVocals(track.audioUrl, 'fast', track.id);
-    }).catch(() => {
-      warmUpModal();
-      separateVocals(track.audioUrl, 'fast', track.id);
-    });
+    // Caching now lives server-side (Supabase Storage, checked inside the
+    // separate-vocals edge function) — there's no cheap local check anymore
+    // to decide whether to skip the warmup ping. Fire both unconditionally;
+    // the warmup ping is lightweight and harmless even on a Storage cache
+    // hit (the edge function just won't end up needing Modal at all).
+    warmUpModal();
+    separateVocals(track.audioUrl, 'fast', track.id);
 
     navigate(`/sing/${track.id}`);
   }, [navigate, separateVocals]);

@@ -28,7 +28,6 @@ import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { useVocalSeparation, warmUpModal } from "@/hooks/useVocalSeparation";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
-import { saveCachedTracks, getCachedTracks } from "@/lib/audioCache";
 import { getDeviceId } from "@/hooks/usePartyDevice";
 import { PartyLeaderboard } from "@/components/PartyLeaderboard";
 import { ArrowLeft, Copy, Check, Play, X, Music, Loader2, Mic, Share2, HelpCircle, Search, Plus } from "lucide-react";
@@ -137,30 +136,21 @@ export default function PartyStage() {
   }, [stageId]);
 
   // ── Background pre-separation of next queued song ───────────────────────────
-  // Uses track_id as cache key (stable across URL expiry) not audioUrl.
+  // Caching now lives server-side inside the separate-vocals edge function
+  // (Supabase Storage, global cache) — no local IndexedDB check/save needed
+  // here anymore. If the song's already in Storage from a previous singer
+  // anywhere, this call returns almost instantly with fromCache: true.
   useEffect(() => {
     const next = queue.find(q => q.status === 'queued');
     if (!next || preSeparatedRef.current.has(next.id)) return;
     preSeparatedRef.current.add(next.id);
 
-    (async () => {
-      try {
-        // Check by stable trackId first
-        const cached = await getCachedTracks(next.track_id);
-        if (cached) { console.log('[Party] Already cached:', next.song_title); return; }
-
-        // Background T4 tier — nobody actively waiting
-        const result = await separateVocals(next.audio_url, 'background', next.track_id);
-        if (!result || result.fromCache) return;
-
-        const instBlob = await fetch(result.instrumentalUrl).then(r => r.blob());
-        const vocBlob = result.vocalsUrl ? await fetch(result.vocalsUrl).then(r => r.blob()) : undefined;
-        await saveCachedTracks(next.track_id, instBlob, vocBlob);
-        console.log('[Party] Pre-cached:', next.song_title);
-      } catch (e) {
-        console.warn('[Party] Pre-separation failed (non-fatal):', e);
-      }
-    })();
+    // Background T4 tier — nobody actively waiting on this one yet.
+    separateVocals(next.audio_url, 'background', next.track_id)
+      .then(result => {
+        if (result) console.log('[Party] Pre-separated:', next.song_title, result.fromCache ? '(Storage cache hit)' : '(fresh)');
+      })
+      .catch(e => console.warn('[Party] Pre-separation failed (non-fatal):', e));
   }, [queue, separateVocals]);
 
   // ── Handlers ────────────────────────────────────────────────────────────────
@@ -263,10 +253,11 @@ export default function PartyStage() {
       .then(result => { if (result?.lyrics?.length > 0) sessionStorage.setItem('prefetchedLyrics', JSON.stringify(result.lyrics)); })
       .catch(() => {});
 
-    // Warm Modal if not already cached (saves wait time for the singer)
-    getCachedTracks(item.track_id).then(cached => {
-      if (!cached) warmUpModal();
-    }).catch(() => { warmUpModal(); });
+    // Warm Modal unconditionally — no local cache check available anymore
+    // (caching lives in Storage, checked server-side). Harmless if it turns
+    // out this song is already cached; the edge function just won't need
+    // Modal at all in that case.
+    warmUpModal();
 
     navigate(`/sing/${track.id}`);
   }, [code, navigate, stageId]);

@@ -48,7 +48,6 @@ import { useVocalSeparation } from "@/hooks/useVocalSeparation";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 import { analyzeVocalActivity, getLineSingingDuration, type VocalInterval } from "@/lib/vocalActivityAnalyzer";
 import { useBackGuard, useBeforeUnloadGuard } from "@/hooks/useBackGuard";
-import { saveCachedTracks } from "@/lib/audioCache";
 import { useWakeLock } from "@/hooks/useWakeLock";
 import { setAudioSessionType } from "@/lib/audioPermissions";
 import { Link } from "react-router-dom";
@@ -194,7 +193,6 @@ const Sing = () => {
   const separationTriggeredRef = useRef<string | null>(null);
   const vocalAnalysisTriggeredRef = useRef<string | null>(null);
   const perTrackResetRef = useRef<string | null>(null);
-  const cachingTriggeredRef = useRef(false);
   const lastCheckpointAtSecondsRef = useRef(0);
   const preEndTriggeredRef = useRef(false);
   const autoSaveTriggeredRef = useRef(false);
@@ -329,69 +327,24 @@ const Sing = () => {
   useEffect(() => {
     if (!track?.audioUrl || perTrackResetRef.current === track.audioUrl) return;
     perTrackResetRef.current = track.audioUrl;
-    cachingTriggeredRef.current = false;
     lastCheckpointAtSecondsRef.current = 0;
     setVocalIntervals(null);
   }, [track?.audioUrl]);
 
-  // ── Cache stems + vocal activity analysis — share the vocals fetch ──────────
-  // Both caching and vocalActivityAnalyzer need the vocals blob.
-  // Previously they fetched it independently — 2× download of a 3-5MB file.
-  // Now: fetch vocals once, pass the blob to both consumers simultaneously.
+  // ── Vocal activity analysis for lyric highlight timing ─────────────────────
+  // Caching of stems now happens server-side inside the separate-vocals edge
+  // function (uploaded to Supabase Storage — a global cache shared by every
+  // user, not per-browser IndexedDB). This client no longer fetches or saves
+  // stem blobs at all — it only needs the vocals URL to time lyric highlights,
+  // whether that URL came from a fresh Modal separation or a Storage cache hit.
   useEffect(() => {
-    if (!separatedAudio || separatedAudio.fromCache || !track?.id) return;
-    if (cachingTriggeredRef.current) return;
-    cachingTriggeredRef.current = true;
-
-    const instUrl = separatedAudio.instrumentalUrl;
-    const vocUrl = separatedAudio.vocalsUrl;
-    const key = track.id;
-
-    (async () => {
-      try {
-        console.log('[Cache] Fetching stems for IndexedDB + vocal analysis');
-        const [instBlob, vocBlob] = await Promise.all([
-          fetch(instUrl).then(r => r.blob()),
-          vocUrl ? fetch(vocUrl).then(r => r.blob()) : Promise.resolve(undefined),
-        ]);
-
-        if (instBlob.size < 10 * 1024) {
-          console.warn('[Cache] Instrumental blob too small, skipping cache');
-          cachingTriggeredRef.current = false;
-          return;
-        }
-
-        await saveCachedTracks(key, instBlob, vocBlob);
-        console.log('[Cache] Saved stems for', key, '—', Math.round(instBlob.size / 1024), 'KB');
-
-        // Run vocal activity analysis on the already-fetched vocals blob
-        if (vocBlob && !vocalAnalysisTriggeredRef.current) {
-          vocalAnalysisTriggeredRef.current = vocUrl!;
-          try {
-            const arrayBuffer = await vocBlob.arrayBuffer();
-            const { analyzeVocalActivityFromBuffer } = await import('@/lib/vocalActivityAnalyzer');
-            const intervals = await analyzeVocalActivityFromBuffer(arrayBuffer);
-            if (intervals?.length) setVocalIntervals(intervals);
-          } catch { /* non-fatal */ }
-        }
-      } catch (e) {
-        console.warn('[Cache] Background caching failed (non-fatal):', e);
-        cachingTriggeredRef.current = false;
-      }
-    })();
-  }, [separatedAudio, track?.id]);
-
-  // ── Vocal analysis for cache-hit tracks ─────────────────────────────────────
-  // When playing from IndexedDB cache, separatedAudio.fromCache=true so the
-  // caching effect above is skipped. Still need vocal analysis for lyric timing.
-  useEffect(() => {
-    if (!separatedAudio?.fromCache || !separatedAudio.vocalsUrl) return;
-    if (vocalAnalysisTriggeredRef.current === separatedAudio.vocalsUrl) return;
-    vocalAnalysisTriggeredRef.current = separatedAudio.vocalsUrl;
-    analyzeVocalActivity(separatedAudio.vocalsUrl)
+    const vocalsUrl = separatedAudio?.vocalsUrl;
+    if (!vocalsUrl || vocalAnalysisTriggeredRef.current === vocalsUrl) return;
+    vocalAnalysisTriggeredRef.current = vocalsUrl;
+    analyzeVocalActivity(vocalsUrl)
       .then(intervals => { if (intervals?.length) setVocalIntervals(intervals); })
-      .catch(() => {});
-  }, [separatedAudio?.vocalsUrl, separatedAudio?.fromCache]);
+      .catch(() => { /* non-fatal — lyric timing falls back to LRC timestamps */ });
+  }, [separatedAudio?.vocalsUrl]);
   useEffect(() => {
     if (!track?.audioUrl) return;
     let isMounted = true;
