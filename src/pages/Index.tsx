@@ -78,6 +78,7 @@ const Index = () => {
   const [query, setQuery] = useState('');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [trendingSongs, setTrendingSongs] = useState<string[]>([]);
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
@@ -155,19 +156,51 @@ const Index = () => {
     const trimmed = q.trim();
     if (!trimmed) return;
     setIsLoading(true);
+    setIsLoadingMore(false);
     setHasSearched(true);
+    setTracks([]);
+
     try {
-      const { data, error } = await supabase.functions.invoke('search-music', {
-        body: { query: trimmed },
+      // Tier 1: JioSaavn + Gaana — both fast, render the instant this returns
+      // instead of waiting for a possible YouTube fallback too.
+      const { data: tier1Data, error: tier1Error } = await supabase.functions.invoke('search-music', {
+        body: { query: trimmed, tier: 'tier1' },
       });
-      if (error) throw error;
-      setTracks(data?.tracks ?? []);
+      if (tier1Error) throw tier1Error;
+
+      const tier1Tracks = tier1Data?.tracks ?? [];
+      setTracks(tier1Tracks);
+      setIsLoading(false);
+
+      // Tier 2: YouTube — only fetched if tier1 said it's worth it (thin
+      // results). Appended to the BOTTOM of the already-rendered list
+      // rather than triggering a full re-sort, so results already on
+      // screen don't jump around while the user is looking at them.
+      if (tier1Data?.shouldFetchMore) {
+        setIsLoadingMore(true);
+        try {
+          const { data: tier2Data, error: tier2Error } = await supabase.functions.invoke('search-music', {
+            body: { query: trimmed, tier: 'tier2' },
+          });
+          if (!tier2Error && tier2Data?.tracks?.length) {
+            // Dedupe against whatever tier1 already showed, just in case
+            const existingIds = new Set(tier1Tracks.map((t: Track) => t.id));
+            const newTracks = tier2Data.tracks.filter((t: Track) => !existingIds.has(t.id));
+            setTracks(prev => [...prev, ...newTracks]);
+          }
+        } catch (err) {
+          // Tier 2 failing is non-fatal — tier1 results are already shown
+          console.warn('[Index] Tier 2 (YouTube) search failed (non-fatal):', err);
+        } finally {
+          setIsLoadingMore(false);
+        }
+      }
     } catch (err) {
       console.error('[Index] Search failed:', err);
       toast({ title: 'Search failed', description: 'Please try again', variant: 'destructive' });
       setTracks([]);
-    } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
   }, [toast]);
 
@@ -205,7 +238,14 @@ const Index = () => {
     // the warmup ping is lightweight and harmless even on a Storage cache
     // hit (the edge function just won't end up needing Modal at all).
     warmUpModal();
-    separateVocals(track.audioUrl, 'fast', track.id);
+    // songMeta lets the edge function compute a canonical cache key
+    // (title+artist+duration) so this song hits the shared Storage cache
+    // even if it was already separated from a different source earlier.
+    separateVocals(track.audioUrl, 'fast', track.id, {
+      title: track.title,
+      artist: track.artist,
+      durationSeconds: parseDurationToSeconds(track.duration) ?? 0,
+    });
 
     navigate(`/sing/${track.id}`);
   }, [navigate, separateVocals]);
@@ -412,6 +452,12 @@ const Index = () => {
                   </div>
                 ))}
               </div>
+              {isLoadingMore && (
+                <div className="py-4 text-center">
+                  <Loader2 className="w-4 h-4 animate-spin text-muted-foreground mx-auto mb-1" />
+                  <p className="text-xs text-muted-foreground">Looking for more...</p>
+                </div>
+              )}
             </>
           ) : null}
         </div>
