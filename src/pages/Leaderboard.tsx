@@ -18,7 +18,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTheme } from '@/hooks/useTheme';
 import { supabase } from '@/integrations/supabase/client';
-import { ArrowLeft, Sun, Moon, Trophy, Medal, Award, Music, MapPin } from 'lucide-react';
+import { ArrowLeft, Sun, Moon, Trophy, Music, MapPin } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,13 +53,6 @@ const RATING_COLOR: Record<string, string> = {
 };
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
-function RankIcon({ index }: { index: number }) {
-  if (index === 0) return <Trophy className="h-4 w-4 text-yellow-500 shrink-0" />;
-  if (index === 1) return <Medal className="h-4 w-4 text-muted-foreground shrink-0" />;
-  if (index === 2) return <Award className="h-4 w-4 text-amber-700 shrink-0" />;
-  return <span className="text-xs font-semibold text-muted-foreground w-4 text-center shrink-0">{index + 1}</span>;
-}
 
 function RowSkeleton() {
   return <div className="h-14 rounded-xl bg-muted/40 animate-pulse mx-2 mb-1" />;
@@ -179,7 +172,6 @@ export default function Leaderboard() {
                 ? <EmptyState label="No performers yet. Be the first!" />
                 : performers.map((p, i) => (
                     <div key={p.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors rounded-xl mx-1">
-                      <RankIcon index={i} />
                       <div className={`h-9 w-9 rounded-full flex items-center justify-center text-sm font-semibold shrink-0 ${
                         i === 0 ? 'gradient-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
                       }`}>
@@ -189,7 +181,12 @@ export default function Leaderboard() {
                         <p className="text-sm font-medium truncate">{p.username}</p>
                         <p className="text-xs text-muted-foreground">{p.songs_performed} song{p.songs_performed !== 1 ? 's' : ''}</p>
                       </div>
-                      <p className="font-bold text-sm shrink-0">{p.total_score.toLocaleString()}</p>
+                      {/* Score is the hero here — large, bold, coloured, sits on top.
+                          Rank is a small muted tag underneath it — context, not the focus. */}
+                      <div className="flex flex-col items-end gap-0.5 shrink-0">
+                        <p className="text-xl font-bold text-primary leading-none">{p.total_score.toLocaleString()}</p>
+                        <span className="text-[10px] text-muted-foreground/50 leading-none">#{i + 1}</span>
+                      </div>
                     </div>
                   ))}
           </div>
@@ -209,7 +206,6 @@ export default function Leaderboard() {
                 ? <EmptyState label="No scores yet. Start singing!" />
                 : scores.map((s, i) => (
                     <div key={s.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors rounded-xl mx-1">
-                      <RankIcon index={i} />
                       {s.thumbnail_url
                         ? <img src={s.thumbnail_url} alt="" className="h-11 w-11 rounded-lg object-cover shrink-0" loading="lazy" />
                         : <div className="h-11 w-11 rounded-lg bg-muted flex items-center justify-center shrink-0">
@@ -227,11 +223,14 @@ export default function Leaderboard() {
                           )}
                         </div>
                       </div>
-                      <div className="text-right shrink-0">
-                        <p className={`font-bold text-sm leading-tight ${RATING_COLOR[s.rating] || 'text-foreground'}`}>
-                          {s.rating}
-                        </p>
-                        <p className="text-xs text-muted-foreground leading-tight">{s.score}</p>
+                      {/* Score is the hero — large, bold, on top. Rating and rank
+                          are both small, muted, tucked underneath it. */}
+                      <div className="flex flex-col items-end gap-0.5 shrink-0">
+                        <p className="text-xl font-bold text-primary leading-none">{s.score.toLocaleString()}</p>
+                        <div className="flex items-center gap-1.5 leading-none">
+                          <span className={`text-[10px] font-semibold ${RATING_COLOR[s.rating] || 'text-foreground'}`}>{s.rating}</span>
+                          <span className="text-[10px] text-muted-foreground/50">#{i + 1}</span>
+                        </div>
                       </div>
                     </div>
                   ))}
