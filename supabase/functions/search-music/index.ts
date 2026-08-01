@@ -5,32 +5,29 @@
 //   Started returning 404 on every request. No SLA on free hobby mirrors.
 //
 // v2 — Attempted multi-mirror fallback with saavn.dev, jiosaavn-api.vercel.app
-//   Both unverified guesses. Confirmed via Supabase logs that all 3 failed.
+//   Both unverified guesses. Confirmed via Supabase logs that all 3 failed:
+//   2x 404, 1x DNS resolution failure (saavn.dev does not resolve from Deno).
 //
-// v3 — Switched to saavn.sumit.co, VERIFIED working via direct fetch.
+// v3 — Switched to saavn.sumit.co, VERIFIED working via direct fetch
+//   Response shape confirmed by live test (not docs, not assumption):
+//     { success: true, data: { total, start, results: [...] } }
+//   Per-song fields confirmed: name, image[].url, downloadUrl[].url,
+//   artists.primary[].name, album.name, duration (number), playCount (number|null)
+//   Rewrote searchSaavn() to match this exact verified shape — no more
+//   defensive .link/.url fallback chains guessing at multiple possible shapes.
 //
-// v4 — Optimized for speed — parallel queries + in-memory cache.
-//
-// v5 — Three-tier CASCADE — JioSaavn → self-hosted wrapper → YouTube.
-//   Root cause of v4 failure: JioSaavn blocks cloud IPs silently — returns
-//   { total: 0, results: [] } with a 200 OK, indistinguishable from a real
-//   zero-match search. All cloud providers affected: GCP, AWS, Render, Railway.
-//   Cascade logic: only tried Plan B if Plan A was empty, only tried Plan C
-//   if Plan B was also empty. Good for resilience, bad for breadth — users
-//   only ever saw ONE source's results, even when the others had different
-//   or better versions of the same song.
-//
-// v6 — CURRENT: Three sources queried in PARALLEL, results MERGED.
-//   All three (JioSaavn, Gaana, YouTube) are called simultaneously on every
-//   search. Whatever comes back gets pooled together, deduplicated by ID,
-//   and ranked by the same relevance+popularity scoring — so the best
-//   result rises to the top regardless of which source it came from,
-//   and users can see multiple versions of a song side by side.
-//   YouTube's timeout tightened 30s -> 15s since it's now always in the
-//   critical path (not just an emergency fallback) — a slow/cold yt-dlp
-//   response can no longer hold up the whole search indefinitely. YouTube's
-//   own server-side 15-min cache means this only bites on genuinely novel
-//   queries nobody has searched yet.
+// v4 — CURRENT: Optimized for speed — parallel queries + in-memory cache
+//   - generateAlternativeQueries() previously ran in a SEQUENTIAL for-loop:
+//     query[0] awaited fully, THEN query[1] if <5 results, THEN query[2]...
+//     Worst case (3 alternative queries, each ~500-800ms): up to 2.4s total.
+//   - Fix: all alternative queries now fire in PARALLEL via Promise.all.
+//     Worst case is now ~800ms (slowest single query), not the sum of all.
+//   - Added in-memory cache (function-instance-scoped, 15 min TTL) for
+//     identical search queries. Supabase edge functions stay warm for
+//     several minutes, so this catches repeat searches for the same song
+//     (very common — e.g. multiple party members searching the same hit).
+//   - Added 5s overall request timeout per Saavn mirror call to prevent
+//     a hanging mirror from stalling the whole search indefinitely.
 // =============================================================================
 
 // supabase/functions/search-music/index.ts
@@ -49,21 +46,26 @@ interface Track {
   artist: string;
   thumbnail: string;
   duration: string;
-  source: 'saavn' | 'youtube';
+  source: 'saavn';
   audioUrl: string;
   album?: string;
   playCount?: number;
-  language?: string;
-  releaseDate?: string;
-  year?: number;
+  language?: string; // from Saavn's own language field, e.g. "hindi", "punjabi", "english"
+  releaseDate?: string; // "YYYY-MM-DD" from Saavn, used to identify genuinely recent releases
+  year?: number; // 4-digit release year -- often populated even when releaseDate is null
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function timedFetch(url: string, ms = 8000): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+// Thrown when EVERY attempt to reach Saavn's API failed outright (network
+// error, timeout, non-2xx) -- distinct from a query that legitimately has
+// no matching songs. Lets the main handler respond with a clear "service
+// unavailable" message instead of a misleading empty result set.
+class SaavnUnavailableError extends Error {
+  constructor() {
+    super('Saavn API is currently unreachable');
+    this.name = 'SaavnUnavailableError';
+  }
 }
 
 function formatDuration(seconds: number): string {
@@ -82,7 +84,20 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, c) => String.fromCharCode(parseInt(c, 16)));
 }
 
+// ─── Original vs Remake Detection ─────────────────────────────────────────────
+//
+// Strategy: scan title + album + artist for known remake markers.
+// If any remake pattern matches → it's a remake.
+// If an "original" signal matches → it's definitely original (overrides ambiguity).
+// Otherwise: fall back to play count (higher play count = more likely original).
+
+
+
 // ─── Scoring ──────────────────────────────────────────────────────────────────
+//
+// Final ranking score = relevance (title/artist match) + popularity
+// Popularity is the primary tiebreaker — the most-played version of a song
+// rises to the top regardless of whether it is a remake or original.
 
 function calculateRelevanceScore(query: string, track: Track): number {
   const q = query.toLowerCase().trim();
@@ -90,30 +105,52 @@ function calculateRelevanceScore(query: string, track: Track): number {
   const artist = track.artist.toLowerCase();
   const album = (track.album || '').toLowerCase();
 
+  // ── Relevance (0-50) — fuzzy word matching ──────────────────────────────────
+  // Uses word-level matching so "sapno" matches "sapnon" (substring check).
+  // Users don't type exact spellings — one letter off should not penalise.
   let relevance = 0;
+
   const qWords = q.split(/\s+/).filter(w => w.length > 1);
   const titleWords = title.split(/\s+/);
   let matchedInTitle = 0;
 
   for (const qw of qWords) {
+    // Fuzzy: query word is a substring of ANY title word, or vice versa
     const inTitle = titleWords.some(tw => tw.includes(qw) || qw.includes(tw));
     if (inTitle) { matchedInTitle++; relevance += 5; }
     else if (artist.includes(qw)) { relevance += 3; }
     else if (album.includes(qw)) { relevance += 2; }
   }
 
+  // High match ratio = strong relevance (replaces exact string match)
   const matchRatio = qWords.length > 0 ? matchedInTitle / qWords.length : 0;
-  if (matchRatio >= 1.0) relevance += 30;
-  else if (matchRatio >= 0.7) relevance += 20;
-  else if (matchRatio >= 0.5) relevance += 10;
+  if (matchRatio >= 1.0) {
+    relevance += 30; // all words found — as good as exact match
+  } else if (matchRatio >= 0.7) {
+    relevance += 20;
+  } else if (matchRatio >= 0.5) {
+    relevance += 10;
+  }
 
+  // Artist name in query
   const artistFirstName = artist.split(/[,\s]/)[0];
-  if (q.includes(artistFirstName) && artistFirstName.length > 2) relevance += 10;
+  if (q.includes(artistFirstName) && artistFirstName.length > 2) {
+    relevance += 10;
+  }
 
+  // ── Popularity (0-150) — DOMINANT factor ───────────────────────────────────
+  // The most-played version of a song should always appear first.
+  // For a karaoke app, users want the version everyone knows.
+  // 100K = 25, 1M = 50, 10M = 100, 50M = 125, 100M = 150
   const popularityScore = track.playCount
     ? Math.min(150, (Math.log10(track.playCount + 1) - 4) * 37.5)
     : 0;
 
+  // ── Demotion penalty for non-original versions ──────────────────────────────
+  // Users searching "mere sapno ki rani" want the original, not a remix/cover.
+  // Penalty is large enough to push these below the original even if they
+  // have a slightly better title match.
+  const titleLower = title;
   const DEMOTE_KEYWORDS = [
     'remix', 'remixed', 'instrumental', 'karaoke', 'unplugged',
     'lofi', 'lo-fi', 'slowed', 'reverb', 'mashup', 'reprise',
@@ -122,13 +159,16 @@ function calculateRelevanceScore(query: string, track: Track): number {
   ];
   let demotionPenalty = 0;
   for (const kw of DEMOTE_KEYWORDS) {
-    if (title.includes(kw)) { demotionPenalty = 80; break; }
+    if (titleLower.includes(kw)) {
+      demotionPenalty = 80;
+      break;
+    }
   }
 
   return relevance + popularityScore - demotionPenalty;
 }
 
-// ─── Query normalisation ───────────────────────────────────────────────────
+// ─── Query normalisation (unchanged from original) ─────────────────────────
 
 const typoFixes: Record<string, string> = {
   'arjit': 'arijit', 'arjith': 'arijit', 'arijith': 'arijit',
@@ -150,22 +190,56 @@ function normalizeQuery(query: string): string {
 function generateAlternativeQueries(query: string): string[] {
   const normalized = normalizeQuery(query);
   const alts: Set<string> = new Set([normalized]);
+
+  // Strip trailing "songs" / "song"
   if (/\bsongs?\b/.test(normalized)) {
     alts.add(normalized.replace(/\s*\bsongs?\b\s*/g, ' ').trim());
   }
+  // Short query: try adding "song" for better results
   if (normalized.split(' ').length <= 2 && !normalized.includes('song')) {
     alts.add(normalized + ' song');
   }
+
   return Array.from(alts).slice(0, 3);
 }
 
-// ─── Plan A: saavn.sumit.co ────────────────────────────────────────────────
+// ─── JioSaavn API (saavn.sumit.co — verified working) ──────────────────────
+//
+// Response shape verified by direct fetch on 2026-06-16:
+//   { success: true, data: { total, start, results: [...] } }
+// Per-song fields verified present: name, image[].url, downloadUrl[].url,
+// artists.primary[].name, album.name, duration (number), playCount (number|null)
 
 const SAAVN_API_BASE = 'https://saavn.sumit.co/api';
 
+// Simple in-memory cache, scoped to this warm function instance.
+// Catches repeat searches for the same query without re-hitting Saavn or
+// re-running the relevance/originality scoring pass.
+const searchCache = new Map<string, { tracks: Track[]; ts: number }>();
+const SEARCH_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+function timedFetch(url: string, ms = 5000): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+// Fetch a single page of Saavn results, with the existing 429 retry logic.
+// Returns [] on any failure -- callers treat missing pages as "no more
+// results" rather than a hard error, so one bad page does not sink the
+// others fetched in parallel.
+// Returns null specifically when the fetch/parse GENUINELY FAILED (network
+// error, timeout, non-2xx status, malformed response) -- distinct from []
+// which means the request SUCCEEDED but had zero results. This
+// distinction did not exist before and was the root cause of Saavn
+// outages being silently indistinguishable from "no results found": every
+// failure mode collapsed to [], so a total Saavn outage looked exactly
+// like a query with no matches, all the way up through a normal 200
+// response with an empty tracks array.
 async function fetchSaavnPage(query: string, page: number): Promise<any[] | null> {
   try {
     const url = `${SAAVN_API_BASE}/search/songs?query=${encodeURIComponent(query)}&page=${page}&limit=40`;
+
     let response = await timedFetch(url);
     if (response.status === 429) {
       await new Promise(r => setTimeout(r, 1200));
@@ -175,15 +249,12 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
       console.error(`Saavn error (page ${page}):`, response.status);
       return null;
     }
+
     const data = await response.json();
     if (!data.success || !data.data?.results) {
       console.error(`Saavn: unexpected response shape (page ${page})`, JSON.stringify(data).slice(0, 200));
       return null;
     }
-    // Return null specifically when total === 0 — signals IP block, not a
-    // genuine empty query. Just means Plan A contributes nothing to the
-    // merged pool this time; Plan B and C run independently regardless.
-    if (data.data.total === 0) return null;
     return data.data.results;
   } catch (err) {
     console.error(`Saavn page ${page} fetch error:`, err);
@@ -191,193 +262,182 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
   }
 }
 
-async function searchPlanA(query: string): Promise<Track[]> {
-  console.log('[Plan A] saavn.sumit.co query:', query);
-  const PAGES_TO_FETCH = 4;
-  const pageResults = await Promise.all(
-    Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
-  );
-
-  if (pageResults.every(p => p === null)) {
-    console.log('[Plan A] all pages null/empty — contributing 0 results to merged pool');
-    return [];
-  }
-
-  const seenIds = new Set<string>();
-  const merged: any[] = [];
-  for (const page of pageResults) {
-    if (!page) continue;
-    for (const song of page) {
-      if (song?.id && !seenIds.has(song.id)) {
-        seenIds.add(song.id);
-        merged.push(song);
-      }
-    }
-  }
-
-  return merged.map((song: any): Track => {
-    const downloadUrls = song.downloadUrl || [];
-    const isSar = (u: any) => typeof u?.url === 'string' && u.url.includes('_sar_');
-    const audioUrl =
-      downloadUrls.find((d: any) => d.quality === '160kbps' && !isSar(d))?.url ||
-      downloadUrls.find((d: any) => d.quality === '96kbps' && !isSar(d))?.url ||
-      downloadUrls.find((d: any) => d.quality === '160kbps')?.url ||
-      downloadUrls.find((d: any) => d.quality === '96kbps')?.url ||
-      downloadUrls[downloadUrls.length - 1]?.url || '';
-
-    const images = song.image || [];
-    const thumbnail =
-      images.find((i: any) => i.quality === '500x500')?.url ||
-      images.find((i: any) => i.quality === '150x150')?.url ||
-      images[images.length - 1]?.url || '';
-
-    const artists = song.artists?.primary?.map((a: any) => a.name).join(', ') || 'Unknown Artist';
-    const playCount = typeof song.playCount === 'number' ? song.playCount : 0;
-    const language = typeof song.language === 'string' ? song.language.toLowerCase() : undefined;
-    const releaseDate = typeof song.releaseDate === 'string' ? song.releaseDate : undefined;
-    const year = typeof song.year === 'number' ? song.year
-      : typeof song.year === 'string' && /^\d{4}$/.test(song.year) ? parseInt(song.year, 10)
-      : undefined;
-
-    return {
-      id: song.id,
-      title: decodeHtmlEntities(song.name || 'Unknown'),
-      artist: decodeHtmlEntities(artists),
-      thumbnail,
-      duration: formatDuration(song.duration || 0),
-      source: 'saavn',
-      audioUrl,
-      album: decodeHtmlEntities(song.album?.name || ''),
-      playCount, language, releaseDate, year,
-    };
-  });
-}
-
-// ─── Plan B: GaanaPy (gaanapy-2ta9.onrender.com) ─────────────────────────
+// Plan B: a self-hosted instance of a DIFFERENT open-source JioSaavn
+// scraper (cyberboysumanjay/JioSaavnAPI, Python/Flask) than the one the
+// primary SAAVN_API_BASE uses (sumitkolhe/jiosaavn-api, TypeScript).
+// Different implementation, SAME underlying source (JioSaavn) -- this
+// protects against "the primary wrapper's specific code/parsing broke"
+// but NOT against a genuine JioSaavn-wide outage, since both ultimately
+// depend on JioSaavn's own site being reachable and scrapable.
 //
-// Self-hosted fork of ZingyTomato/GaanaPy deployed on Render.
-// Returns HLS stream URLs (signed, expire in ~4hrs) — acceptable since
-// users won't wait that long between search and singing.
-// play_count field is a string like "180M+" — not useful for ranking.
-// popularity field has the raw number "180431071~180431071" — we parse
-// the first part for ranking.
-// Configured via GAANA_API_URL secret.
+// Configured via the JIOSAAVN_FALLBACK_URL secret (Supabase edge function
+// env var) rather than hardcoded, since it points at a self-hosted
+// instance whose URL depends on where it's deployed. If that secret
+// isn't set, the fallback is silently skipped (returns null immediately)
+// rather than erroring -- makes this safe to ship before the fallback
+// instance is actually deployed and configured.
+async function fetchFromFallbackWrapper(query: string): Promise<Track[] | null> {
+  const fallbackBase = Deno.env.get('JIOSAAVN_FALLBACK_URL');
+  if (!fallbackBase) return null;
 
-async function searchPlanB(query: string): Promise<Track[]> {
-  const gaanaBase = Deno.env.get('GAANA_API_URL');
-  if (!gaanaBase) {
-    console.log('[Plan B] GAANA_API_URL not set — skipping');
-    return [];
-  }
-
-  console.log('[Plan B] Gaana query:', query);
   try {
-    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search?query=${encodeURIComponent(query)}&limit=20`;
-    const response = await timedFetch(url, 10000);
+    const url = `${fallbackBase.replace(/\/$/, '')}/result/?query=${encodeURIComponent(query)}`;
+    const response = await timedFetch(url, 8000); // self-hosted free-tier instances can be slower, especially cold-starting
     if (!response.ok) {
-      console.error('[Plan B] Gaana error:', response.status);
-      return [];
+      console.error('Fallback wrapper error:', response.status);
+      return null;
     }
 
     const data = await response.json();
-    const rawList: any[] = Array.isArray(data) ? data : [];
+    // Defensive about the exact response shape -- could be a bare array,
+    // or wrapped under a common key, depending on the endpoint/version.
+    const rawList: any[] = Array.isArray(data) ? data
+      : Array.isArray(data?.results) ? data.results
+      : Array.isArray(data?.data) ? data.data
+      : [];
 
-    if (rawList.length === 0) {
-      console.log('[Plan B] Gaana returned empty — contributing 0 results to merged pool');
-      return [];
-    }
+    if (rawList.length === 0) return null;
 
-    console.log(`[Plan B] Gaana returned ${rawList.length} results`);
+    // Field mapping below is based on a REAL response from the deployed
+    // instance, not documentation examples -- several assumed field names
+    // were wrong on the first pass (there is no "url", "songid", or
+    // "image_url" field at all; the real ones are "media_url", "id", and
+    // "image"). Corrected after manually verifying media_url actually
+    // plays a full song despite the response also carrying "is_drm": 1
+    // and "disabled_text": "Pro Only" flags -- those flags are present on
+    // every track including ones confirmed to play fine, so they're not
+    // reliably enforced on this endpoint and are deliberately ignored
+    // here rather than used as a filter (filtering on them would wrongly
+    // reject tracks that actually work).
     return rawList
-      .filter((s: any) => s?.stream_urls?.urls?.very_high_quality || s?.stream_urls?.urls?.high_quality)
-      .map((s: any): Track => {
+      .filter((s: any) => s?.media_url) // must have a playable audio URL
+      .map((s: any) => {
         const durationSecs = parseInt(s.duration, 10) || 0;
-        // popularity is "180431071~180431071" — parse first number
-        const popularityRaw = typeof s.popularity === 'string' ? s.popularity.split('~')[0] : '0';
-        const playCount = parseInt(popularityRaw, 10) || 0;
-        // prefer highest quality HLS stream
-        const audioUrl =
-          s.stream_urls?.urls?.very_high_quality ||
-          s.stream_urls?.urls?.high_quality ||
-          s.stream_urls?.urls?.medium_quality || '';
-        const thumbnail =
-          s.images?.urls?.large_artwork ||
-          s.images?.urls?.medium_artwork ||
-          s.images?.urls?.small_artwork || '';
-        const releaseDate = typeof s.release_date === 'string' ? s.release_date : undefined;
-        const year = releaseDate ? parseInt(releaseDate.slice(0, 4), 10) : undefined;
-
+        const year = typeof s.year === 'string' && /^\d{4}$/.test(s.year) ? parseInt(s.year, 10) : undefined;
+        // "singers" can be an empty string (seen in real responses) --
+        // fall back to primary_artists when that happens.
+        const artistName = (s.singers && s.singers.trim()) || s.primary_artists || 'Unknown Artist';
         return {
-          id: s.track_id || s.seokey,
-          title: decodeHtmlEntities(s.title || 'Unknown'),
-          artist: decodeHtmlEntities(s.artists || 'Unknown Artist'),
-          thumbnail,
+          id: s.id || s.media_url,
+          title: decodeHtmlEntities(s.song || s.title || 'Unknown'),
+          artist: decodeHtmlEntities(artistName),
+          thumbnail: s.image || '',
           duration: formatDuration(durationSecs),
-          source: 'saavn', // Gaana is still an Indian music source
-          audioUrl,
+          source: 'saavn' as const,
+          audioUrl: s.media_url,
           album: decodeHtmlEntities(s.album || ''),
-          playCount,
+          playCount: typeof s.play_count === 'number' ? s.play_count : 0,
           language: typeof s.language === 'string' ? s.language.toLowerCase() : undefined,
-          releaseDate,
           year,
         };
       });
   } catch (err) {
-    console.error('[Plan B] Gaana fetch error:', err);
-    return [];
+    console.error('Fallback wrapper fetch error:', err);
+    return null;
   }
 }
 
-// ─── Plan C: self-hosted yt-dlp Flask server ──────────────────────────────
-
-async function searchPlanC(query: string): Promise<Track[]> {
-  const ytBase = Deno.env.get('YOUTUBE_SEARCH_URL');
-  if (!ytBase) {
-    console.log('[Plan C] YOUTUBE_SEARCH_URL not set — skipping');
-    return [];
-  }
-
-  console.log('[Plan C] YouTube/yt-dlp query:', query);
+async function searchSaavn(query: string): Promise<Track[]> {
   try {
-    const url = `${ytBase.replace(/\/$/, '')}/search?query=${encodeURIComponent(query)}`;
-    const response = await timedFetch(url, 15000); // tightened from 30s — always in
-    // the critical path now (parallel, not last-resort fallback); yt-dlp's own
-    // 15-min server-side cache means only genuinely novel queries hit this ceiling
-    if (!response.ok) {
-      console.error('[Plan C] error:', response.status);
-      return [];
+    // Saavn's API caps at ~40 results PER PAGE regardless of the limit
+    // param -- that part is a real ceiling on their side, confirmed via
+    // testing. But it DOES support pagination, so to remove the effective
+    // 40-result restriction we fetch multiple pages in parallel and merge
+    // them, instead of just asking for a bigger single page (which gets
+    // silently clamped back to ~40 anyway).
+    console.log('Saavn query:', query);
+    const PAGES_TO_FETCH = 4; // pages 1-4 in parallel -- up to ~160 results
+    const pageResults = await Promise.all(
+      Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
+    );
+
+    // If EVERY page fetch failed (all null), this is a genuine outage --
+    // not a real "no results" response. Signal that upward by throwing a
+    // distinct, identifiable error rather than silently returning [],
+    // which is indistinguishable from a real zero-match search.
+    if (pageResults.every(p => p === null)) {
+      console.error('Primary Saavn source fully unreachable -- trying fallback wrapper');
+      const fallbackTracks = await fetchFromFallbackWrapper(query);
+      if (fallbackTracks && fallbackTracks.length > 0) {
+        console.log(`Fallback wrapper returned ${fallbackTracks.length} tracks`);
+        return fallbackTracks;
+      }
+      // Fallback either isn't configured, or also failed -- genuinely
+      // out of options, surface the outage.
+      throw new SaavnUnavailableError();
     }
 
-    const data = await response.json();
-    if (!Array.isArray(data)) {
-      console.error('[Plan C] unexpected response shape');
-      return [];
+    // Merge and dedupe by song id (Saavn's pagination can occasionally
+    // overlap by a track or two at page boundaries). Pages that failed
+    // (null) are simply skipped -- a partial outage (some pages succeed,
+    // some don't) still returns whatever real results came through.
+    const seenIds = new Set<string>();
+    const merged: any[] = [];
+    for (const page of pageResults) {
+      if (!page) continue;
+      for (const song of page) {
+        if (song?.id && !seenIds.has(song.id)) {
+          seenIds.add(song.id);
+          merged.push(song);
+        }
+      }
     }
 
-    console.log(`[Plan C] returned ${data.length} results`);
-    return data
-      .filter((t: any) => t?.id && t?.audioUrl && t?.title)
-      .map((t: any): Track => ({
-        id: t.id,
-        title: decodeHtmlEntities(t.title || 'Unknown'),
-        artist: decodeHtmlEntities(t.artist || 'Unknown Artist'),
-        thumbnail: t.thumbnail || '',
-        duration: t.duration || '0:00',
-        source: 'youtube',
-        audioUrl: t.audioUrl,
-        album: decodeHtmlEntities(t.album || ''),
-        playCount: typeof t.playCount === 'number' ? t.playCount : 0,
-      }));
+    return merged.map((song: any) => {
+      // downloadUrl[] entries use `.url` (confirmed — no `.link` field exists)
+      const downloadUrls = song.downloadUrl || [];
+      // Prefer standard stereo AAC. Skip SAR-encoded URLs (_sar_ in path) —
+      // they are Sony Spatial Audio multi-channel files that take 2-3x longer
+      // to separate than standard stereo. Fall back to 96kbps stereo if the
+      // 160kbps tier is only available in SAR format for this track.
+      const isSar = (u: any) => typeof u?.url === 'string' && u.url.includes('_sar_');
+      const audioUrl =
+        downloadUrls.find((d: any) => d.quality === '160kbps' && !isSar(d))?.url ||
+        downloadUrls.find((d: any) => d.quality === '96kbps' && !isSar(d))?.url ||
+        downloadUrls.find((d: any) => d.quality === '160kbps')?.url ||
+        downloadUrls.find((d: any) => d.quality === '96kbps')?.url ||
+        downloadUrls[downloadUrls.length - 1]?.url || '';
+
+      // image[] entries use `.url` (confirmed — no `.link` field exists)
+      const images = song.image || [];
+      const thumbnail =
+        images.find((i: any) => i.quality === '500x500')?.url ||
+        images.find((i: any) => i.quality === '150x150')?.url ||
+        images[images.length - 1]?.url || '';
+
+      // artists.primary[] confirmed present on every song
+      const artists =
+        song.artists?.primary?.map((a: any) => a.name).join(', ') ||
+        'Unknown Artist';
+
+      const title = decodeHtmlEntities(song.name || 'Unknown');
+      const artist = decodeHtmlEntities(artists);
+      const album = decodeHtmlEntities(song.album?.name || '');
+      // playCount confirmed nullable — default to 0 when null
+      const playCount = typeof song.playCount === 'number' ? song.playCount : 0;
+      // language confirmed present on Saavn song objects (e.g. "hindi", "punjabi", "english")
+      const language = typeof song.language === 'string' ? song.language.toLowerCase() : undefined;
+      // releaseDate is often null on this API even for recent songs -- year
+      // is a coarser but more reliably populated fallback signal.
+      const releaseDate = typeof song.releaseDate === 'string' ? song.releaseDate : undefined;
+      const year = typeof song.year === 'number' ? song.year
+        : typeof song.year === 'string' && /^\d{4}$/.test(song.year) ? parseInt(song.year, 10)
+        : undefined;
+      return {
+        id: song.id, title, artist, thumbnail,
+        duration: formatDuration(song.duration || 0),
+        source: 'saavn' as const,
+        audioUrl, album, playCount, language, releaseDate, year,
+      };
+    });
   } catch (err) {
-    console.error('[Plan C] fetch error:', err);
+    if (err instanceof SaavnUnavailableError) throw err; // propagate, don't swallow
+    console.error('Saavn search error:', err);
     return [];
   }
 }
 
-// ─── Cache + ranking ──────────────────────────────────────────────────────
-
-const searchCache = new Map<string, { tracks: Track[]; ts: number }>();
-const SEARCH_CACHE_TTL_MS = 15 * 60 * 1000;
+// ─── Main search with dedup + ranking ─────────────────────────────────────
 
 async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> {
   const normalizedForCache = normalizeQuery(originalQuery);
@@ -390,27 +450,19 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
   const queries = generateAlternativeQueries(originalQuery);
   console.log('Queries:', queries);
 
-  // Query all three sources IN PARALLEL and merge whatever comes back.
-  // Each source has its own internal timeout (Plan A ~8s default, Plan B
-  // 10s, Plan C 15s) so one slow source can't indefinitely block the
-  // others — the whole call resolves as soon as the slowest one finishes
-  // or times out, whichever comes first.
-  const [planAResults, planBResults, planCResults] = await Promise.all([
-    (async () => {
-      let results = await searchPlanA(queries[0]);
-      if (results.length < 5 && queries.length > 1) {
-        const remaining = await Promise.all(queries.slice(1).map(q => searchPlanA(q)));
-        results = [...results, ...remaining.flat()];
-      }
-      return results;
-    })(),
-    searchPlanB(queries[0]),
-    searchPlanC(queries[0]),
-  ]);
+  // OPTIMIZATION: run the primary query first (most likely to succeed alone).
+  // Only fire the alternative queries in PARALLEL if the primary came up short —
+  // this avoids wasting calls on the common case where query[0] already
+  // returns plenty of results, while still being fast when it doesn't.
+  let allTracks = await searchSaavn(queries[0]);
 
-  console.log(`Sources returned — JioSaavn: ${planAResults.length}, Gaana: ${planBResults.length}, YouTube: ${planCResults.length}`);
-
-  const allTracks = [...planAResults, ...planBResults, ...planCResults];
+  if (allTracks.length < 5 && queries.length > 1) {
+    // Previously: sequential for-loop, each query awaited before the next.
+    // Now: all remaining queries fire together — total time ≈ slowest one,
+    // not the sum of all of them.
+    const remaining = await Promise.all(queries.slice(1).map(q => searchSaavn(q)));
+    allTracks = [...allTracks, ...remaining.flat()];
+  }
 
   // Deduplicate by ID
   const seen = new Set<string>();
@@ -419,19 +471,26 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
     if (!seen.has(t.id)) { seen.add(t.id); unique.push(t); }
   }
 
-  // Sort by relevance + popularity
+  // Sort: originals first, then by relevance + popularity
+  const normalizedQ = normalizeQuery(originalQuery);
   const scored = unique
-    .map(t => ({ t, score: calculateRelevanceScore(normalizedForCache, t) }))
+    .map(t => ({ t, score: calculateRelevanceScore(normalizedQ, t) }))
     .sort((a, b) => {
+      // Primary: score (relevance + popularity)
       if (b.score !== a.score) return b.score - a.score;
+      // Tiebreaker: raw play count
       return (b.t.playCount || 0) - (a.t.playCount || 0);
     });
 
   console.log('Top 5 results:');
   scored.slice(0, 5).forEach(({ t, score }) => {
-    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(12)} | ${t.source} | ${t.title} — ${t.artist}`);
+    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(10)} plays | ${t.title} — ${t.artist}`);
   });
 
+  // No count cap here anymore -- the frontend shows results in a
+  // scrollable container instead of relying on the backend to truncate.
+  // Every genuinely relevant result Saavn returned is available to scroll
+  // through, not just the first 20.
   const finalTracks = scored.map(({ t }) => t);
   searchCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
   return finalTracks;
@@ -460,6 +519,7 @@ serve(async (req) => {
       );
     }
 
+    console.log('Search query:', trimmed);
     const tracks = await searchWithFuzzyMatching(trimmed);
     console.log(`Returning ${tracks.length} tracks`);
 
@@ -469,6 +529,16 @@ serve(async (req) => {
     );
 
   } catch (err: unknown) {
+    if (err instanceof SaavnUnavailableError) {
+      console.error('Saavn API is down -- returning 503');
+      return new Response(
+        JSON.stringify({
+          error: 'Music service is temporarily unavailable. Please try again in a few minutes.',
+          upstreamDown: true,
+        }),
+        { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     console.error('Search error:', msg);
     return new Response(
