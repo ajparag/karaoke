@@ -52,6 +52,41 @@ function json(body: unknown, status = 200) {
   });
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+// Converts a Uint8Array to a base64 string WITHOUT spreading it into
+// String.fromCharCode's arguments. Spreading (...bytes) blows the JS
+// engine's call stack for anything beyond ~65,000 elements — an MP3 file
+// is several million bytes, so the naive version would throw
+// "RangeError: Maximum call stack size exceeded" every time this fallback
+// path actually ran, defeating its entire purpose (never blocking the user).
+// Chunking at 8192 bytes keeps every fromCharCode call well under any
+// engine's argument-count limit.
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// Validates a trackId before it's ever used to build a Storage path.
+// Current call sites (Index.tsx, Sing.tsx, PartyStage.tsx) always pass a
+// clean ID from search results — but useVocalSeparation.ts's cacheKey
+// falls back to the raw audioUrl if trackId is ever omitted, which would
+// otherwise get interpolated straight into a Storage path (slashes and
+// query params would create a broken nested folder structure). This is
+// the server-side backstop against that, regardless of what the client
+// does or doesn't send.
+function isValidTrackId(trackId: string): boolean {
+  if (!trackId || trackId.length === 0 || trackId.length > 200) return false;
+  // Alphanumeric plus the handful of separator characters real track IDs
+  // use (JioSaavn hashes, Gaana numeric IDs, YouTube video IDs) — no
+  // slashes, no query characters, no path traversal sequences.
+  return /^[A-Za-z0-9_-]+$/.test(trackId);
+}
+
 // ─── Storage helpers ────────────────────────────────────────────────────────
 
 function storagePaths(trackId: string) {
@@ -112,6 +147,12 @@ async function uploadToStorageCache(
 
     if (instRes.error || vocRes.error) {
       console.error("[separate-vocals] Storage upload failed:", instRes.error, vocRes.error);
+      // Clean up whichever upload DID succeed — otherwise it sits in Storage
+      // forever as an orphan (checkStorageCache requires both files present
+      // to count as a hit, so a lone instrumental.mp3 is permanently unused
+      // dead weight, just quietly costing storage space).
+      if (!instRes.error) await admin.storage.from(STORAGE_BUCKET).remove([paths.instrumental]).catch(() => {});
+      if (!vocRes.error) await admin.storage.from(STORAGE_BUCKET).remove([paths.vocals]).catch(() => {});
       return null;
     }
 
@@ -219,6 +260,10 @@ serve(async (req) => {
       if (!audioUrl || !trackId) {
         return json({ error: "audioUrl and trackId are required" }, 400);
       }
+      if (!isValidTrackId(trackId)) {
+        console.error("[separate-vocals] Rejected invalid trackId:", trackId.slice(0, 100));
+        return json({ error: "Invalid trackId format" }, 400);
+      }
 
       const admin = createClient(
         Deno.env.get("SUPABASE_URL")!,
@@ -250,8 +295,8 @@ serve(async (req) => {
       // Storage upload failed (rare) — fall back to returning the raw bytes
       // as data URLs so the user isn't blocked, just not cached for next time.
       console.warn("[separate-vocals] Storage upload failed, returning inline data URLs as fallback");
-      const instB64 = btoa(String.fromCharCode(...stems.instrumentalBytes));
-      const vocB64 = stems.vocalsBytes.length > 0 ? btoa(String.fromCharCode(...stems.vocalsBytes)) : null;
+      const instB64 = bytesToBase64(stems.instrumentalBytes);
+      const vocB64 = stems.vocalsBytes.length > 0 ? bytesToBase64(stems.vocalsBytes) : null;
       return json({
         instrumentalUrl: `data:audio/mpeg;base64,${instB64}`,
         vocalsUrl: vocB64 ? `data:audio/mpeg;base64,${vocB64}` : undefined,
