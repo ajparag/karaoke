@@ -1,34 +1,31 @@
 // =============================================================================
 // CHANGELOG
 // =============================================================================
-// v1 -- Browser downloaded audio from Saavn then uploaded to Modal.
-// v2 -- Parallel warmup + download.
-// v3 -- URL-direct: Modal fetches from Saavn CDN server-side (<1s).
+// v1-v5 -- Streaming mode: browser called Modal's /separate-by-url directly.
+//   MODAL_API_KEY was hardcoded in this client-side file -- visible to
+//   anyone via dev tools or view-source. Each browser also cached results
+//   locally in IndexedDB, so the same song got separated by Modal's GPU
+//   once per unique device, even for songs thousands of people had already
+//   sung.
 //
-// v4 -- CURRENT: Optimized streaming-only mode.
-//   REMOVED: prefetchAudio (browser was downloading 4-5MB from Saavn for
-//     no reason -- Modal downloads from CDN at datacenter speed).
-//   REMOVED: getAudioBlob, downloadTrack, parseHFResult, normalizeGradioFileUrl,
-//     audioPrefetchCache -- all dead code from the old blob-upload path.
-//   REMOVED: IndexedDB cache references (streaming mode has no blobs to cache).
-//   FIXED: warmup staleness -- re-pings Modal if >3 min since last warmup.
-//     Previously hfSpaceWarmedUp=true was permanent, so if the container
-//     went cold after idle timeout, warmup was silently skipped.
-//   GPU: batch_size 32->64, overlap 0.1->0.025 (in modal_app.py).
-//
-// v5 -- CURRENT: Re-introduced IndexedDB caching, but as a pure fast-path
-//   lookup only -- streaming mode is untouched and remains the default for
-//   every first play. Before calling Modal, we check IndexedDB for a
-//   previously-cached instrumental/vocals blob for this exact audioUrl.
-//   Cache HIT -> instant playback via object URLs, zero Modal calls, zero
-//   GPU cost. Cache MISS -> falls through to the normal streaming pipeline
-//   exactly as before. The actual save-to-cache happens elsewhere (Sing.tsx,
-//   only after the song has fully buffered) -- this file only ever reads
-//   the cache, it does not write to it.
+// v6 -- CURRENT: All separation now goes through the `separate-vocals`
+//   Supabase Edge Function. This file no longer talks to Modal at all, and
+//   no longer touches IndexedDB.
+//   - Modal's API key lives only in the edge function now.
+//   - The edge function checks Supabase Storage (a GLOBAL cache shared by
+//     every user, not per-browser) before calling Modal. First person to
+//     sing a song pays the GPU cost; everyone after gets an instant public
+//     Storage URL back.
+//   - REMOVED: getCachedTracks/clearOldCache imports (audioCache.ts is no
+//     longer used by this file -- caching is now server-side).
+//   - REMOVED: MODAL_URL_FAST/MODAL_URL_BACKGROUND/MODAL_API_KEY constants.
+//   - The in-flight promise dedup cache (separationPromiseCache) is KEPT --
+//     it still matters for preventing duplicate simultaneous edge function
+//     calls from the same browser tab (e.g. a party host singing while
+//     background pre-separation races for the same track).
 // =============================================================================
 
 import { useState, useCallback, useRef } from 'react';
-import { clearOldCache, getCachedTracks } from '@/lib/audioCache';
 import { supabase } from '@/integrations/supabase/client';
 
 interface SeparationResult {
@@ -119,13 +116,8 @@ if (typeof window !== 'undefined') {
 // =============================================================================
 // WARMUP
 // =============================================================================
-
-// Two-tier GPU deployment: FAST (A10G) for anything a live user is
-// waiting on, BACKGROUND (T4, cheaper/slower) for silent pre-separation
-// of queued party songs with minutes of buffer before they're needed.
-const MODAL_URL_FAST = 'https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run';
-const MODAL_URL_BACKGROUND = 'https://ajparag--vocal-separator-v3-vocalseparatorbackground-ui.modal.run';
-const MODAL_API_KEY = 'pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32';
+// Still goes through the edge function's "warmup" action -- unchanged from
+// before, this never exposed the API key client-side to begin with.
 
 export type SeparationTier = 'fast' | 'background';
 const WARMUP_STALE_MS = 1 * 60 * 1000; // re-ping if >1 min since last warmup
@@ -139,11 +131,7 @@ interface InFlightSeparation {
 }
 const separationPromiseCache = new Map<string, InFlightSeparation>();
 
-// warmUpModal — pings the Modal container via the Supabase edge function
-// to reduce cold-start latency. Called from Index.tsx when the user selects
-// a song and the track is not already in IndexedDB cache.
 export async function warmUpModal(): Promise<void> {
-  // Re-ping if warmup is stale (container may have gone cold after idle timeout)
   if (lastWarmupTs > 0 && Date.now() - lastWarmupTs < WARMUP_STALE_MS) return;
   if (warmUpPromise) return warmUpPromise;
 
@@ -161,8 +149,6 @@ export async function warmUpModal(): Promise<void> {
         sepLog('WARMUP', `Modal awake in ${ms}ms`);
         sepStage('warmup', 'ok', `awake in ${ms}ms`);
       } else {
-        // Container is booting but model not loaded yet.
-        // Still set timestamp so we don't spam warmup calls.
         lastWarmupTs = Date.now();
         sepStage('warmup', 'warning', `ready=false (${ms}ms) -- container may still be loading`);
       }
@@ -177,8 +163,6 @@ export async function warmUpModal(): Promise<void> {
   return warmUpPromise;
 }
 
-
-
 // =============================================================================
 // SEPARATION HOOK
 // =============================================================================
@@ -192,27 +176,18 @@ export function useVocalSeparation() {
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast', trackId?: string): Promise<SeparationResult | null> => {
-    // Cache key: use stable trackId if provided (survives URL expiry on refresh).
-    // Falls back to audioUrl only when trackId is not available (e.g. Party Mode
-    // background pre-separation where we may not have the track object).
+    // trackId is required now -- it's the Storage cache key server-side.
+    // Falls back to a hash-free slice of audioUrl only in the unlikely case
+    // a caller doesn't have one yet, but every real call site passes it.
     const cacheKey = trackId ?? audioUrl;
     setIsProcessing(true);
-    setProgress('Checking cache...');
+    setProgress('Starting AI separation...');
     setError(null);
 
-    // Deduplicate FIRST, before any await (including the cache check).
-    // This must happen synchronously relative to any other caller for the
-    // SAME audioUrl -- e.g. Party Mode's background (T4) pre-separation of
-    // the next queued song, and Sing.tsx's normal fast (A10G) call for
-    // that same song once the host taps Play. If the dedup check ran
-    // AFTER an awaited cache lookup (as it used to), both callers could
-    // pass the empty check before either claimed the slot -- because the
-    // await yields control back to the browser, letting a second call's
-    // own cache-check run in the gap. Claiming the slot with zero awaits
-    // in between closes that race: whichever call reaches this line first
-    // wins and does the real work (cache check, then Modal if needed);
-    // every other caller for the same URL just attaches to that one
-    // shared result, regardless of which tier or page triggered it.
+    // Deduplicate FIRST, before any await. Same rationale as before: two
+    // callers for the same track (e.g. party pre-separation + the singer's
+    // own Play tap) must share one in-flight edge function call, not fire
+    // two separate ones.
     const existing = separationPromiseCache.get(cacheKey);
     if (existing) {
       setActiveTier(existing.tier);
@@ -233,92 +208,36 @@ export function useVocalSeparation() {
     abortControllerRef.current = new AbortController();
 
     try {
-      // Cache check now happens INSIDE the claimed slot -- no one else can
-      // Race past this, since they'd already have attached to `shared` above.
-      try {
-        // Try stable trackId key first (new format), then fall back to audioUrl
-        // (old format — songs cached before the key migration). This ensures
-        // songs cached under the old audioUrl key still hit the cache.
-        let cached = await getCachedTracks(cacheKey);
-        if (!cached && cacheKey !== audioUrl) {
-          cached = await getCachedTracks(audioUrl);
-          if (cached) {
-            sepLog('CACHE', `IndexedDB HIT on legacy audioUrl key — will re-cache under trackId`);
-          }
-        }
-
-        if (cached) {
-          // Validate blob is non-empty before using it. A 0-byte or tiny blob
-          // means the fetch was interrupted during caching — treat as a miss
-          // and fall through to Modal to get fresh stems.
-          const MIN_BLOB_SIZE = 10 * 1024; // 10KB minimum — any real audio file is larger
-          if (cached.instrumentalBlob.size < MIN_BLOB_SIZE) {
-            sepLog('CACHE', `IndexedDB entry corrupted (${cached.instrumentalBlob.size} bytes) — falling through to Modal`);
-            // Non-fatal — just fall through to Modal, it will re-cache correctly after separation
-          } else {
-            sepLog('CACHE', `IndexedDB HIT (key: ${cacheKey.slice(0, 30)}, ${Math.round(cached.instrumentalBlob.size / 1024)}KB) -- skipping Modal`);
-            const instrumentalUrl = URL.createObjectURL(cached.instrumentalBlob);
-            const vocalsUrl = cached.vocalsBlob ? URL.createObjectURL(cached.vocalsBlob) : undefined;
-            const result: SeparationResult = { instrumentalUrl, vocalsUrl, fromCache: true };
-            setSeparatedAudio(result);
-            setProgress('');
-            setIsProcessing(false);
-            resolveShared(result);
-            return result;
-          }
-        }
-      } catch (e) {
-        console.warn('[VocalSeparation] Cache check failed (non-fatal, falling through to Modal):', e);
-      }
-
-      setProgress('Starting AI separation...');
-      clearOldCache(7).catch(() => {});
-
       const t0 = Date.now();
       _currentSepUrl = audioUrl;
       _currentSepStartTs = t0;
       const elapsed = () => `+${Date.now() - t0}ms`;
 
-      sepLog('SEP', `Separation started for: ${audioUrl.slice(0, 60)}`);
-      sepStage('separation', 'pending', 'Modal downloading + GPU separating');
+      sepLog('SEP', `Separation requested for: ${audioUrl.slice(0, 60)}`);
+      sepStage('separation', 'pending', 'edge function checking Storage cache / calling Modal');
+      sepLog('SEP', `Using ${tier.toUpperCase()} tier`);
 
-      // Call Modal /separate-by-url directly (browser -> Modal, CORS allowed
-      // for karaokeparty.in). Modal downloads from Saavn CDN at datacenter
-      // speed (~300ms) then runs GPU separation.
-      setProgress('AI is separating vocals...');
-      sepLog('SEP', `${elapsed()} Calling /separate-by-url...`);
-
-      const modalUrl = tier === 'background' ? MODAL_URL_BACKGROUND : MODAL_URL_FAST;
-      sepLog('SEP', `Using ${tier.toUpperCase()} tier (${tier === 'background' ? 'T4' : 'A10G'})`);
-
-      const resp = await fetch(`${modalUrl}/separate-by-url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': MODAL_API_KEY },
-        body: JSON.stringify({ audio_url: audioUrl }),
+      // Single call to the edge function. It internally checks the global
+      // Storage cache first, and only calls Modal on a genuine miss --
+      // this hook has no visibility into (or need to know) which happened.
+      const { data, error: fnError } = await supabase.functions.invoke('separate-vocals', {
+        body: { action: 'separate', audioUrl, trackId: cacheKey, tier },
       });
 
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        throw new Error(`Separation failed: ${resp.status} ${errText.slice(0, 100)}`);
-      }
-
-      const json = await resp.json();
-      const instUrl = json?.instrumental_url ? `${modalUrl}${json.instrumental_url}` : null;
-      const vocUrl = json?.vocal_url ? `${modalUrl}${json.vocal_url}` : null;
-
-      if (!instUrl) throw new Error('No instrumental URL returned');
+      if (fnError) throw new Error(fnError.message || 'Separation request failed');
+      if (data?.error) throw new Error(data.error);
+      if (!data?.instrumentalUrl) throw new Error('No instrumental URL returned');
 
       const secs = Math.round((Date.now() - t0) / 1000);
-      sepLog('SEP', `${elapsed()} Done in ${secs}s (CDN download + GPU + streaming URLs)`);
-      sepLog('SEP', `${elapsed()} Streaming mode -- returning Modal URLs`);
-      sepStage('separation', 'ok', `done in ${secs}s`);
-      sepStage('result', 'ok', 'streaming URLs ready');
-      console.log('[VocalSeparation] Total time:', secs, 's');
+      sepLog('SEP', `${elapsed()} Done in ${secs}s (fromCache: ${!!data.fromCache})`);
+      sepStage('separation', 'ok', `done in ${secs}s${data.fromCache ? ' (Storage cache hit)' : ' (fresh Modal separation)'}`);
+      sepStage('result', 'ok', 'Storage URLs ready');
+      console.log('[VocalSeparation] Total time:', secs, 's', data.fromCache ? '(cached)' : '(fresh)');
 
       const result: SeparationResult = {
-        instrumentalUrl: instUrl,
-        vocalsUrl: vocUrl ?? undefined,
-        fromCache: false,
+        instrumentalUrl: data.instrumentalUrl,
+        vocalsUrl: data.vocalsUrl ?? undefined,
+        fromCache: !!data.fromCache,
       };
 
       setSeparatedAudio(result);
