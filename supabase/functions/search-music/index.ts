@@ -11,22 +11,26 @@
 //
 // v4 — Optimized for speed — parallel queries + in-memory cache.
 //
-// v5 — CURRENT: Three-tier cascade — JioSaavn → self-hosted wrapper → YouTube
+// v5 — Three-tier CASCADE — JioSaavn → self-hosted wrapper → YouTube.
 //   Root cause of v4 failure: JioSaavn blocks cloud IPs silently — returns
 //   { total: 0, results: [] } with a 200 OK, indistinguishable from a real
 //   zero-match search. All cloud providers affected: GCP, AWS, Render, Railway.
+//   Cascade logic: only tried Plan B if Plan A was empty, only tried Plan C
+//   if Plan B was also empty. Good for resilience, bad for breadth — users
+//   only ever saw ONE source's results, even when the others had different
+//   or better versions of the same song.
 //
-//   Cascade logic (simple — zero results triggers next tier):
-//   Plan A: saavn.sumit.co (best metadata, play counts, language fields)
-//   Plan B: GaanaPy on Render (gaanapy-2ta9.onrender.com)
-//            fork of ZingyTomato/GaanaPy — different source, different IP
-//            configured via GAANA_API_URL secret
-//            returns HLS stream URLs, signed tokens expire in ~4hrs
-//   Plan C: self-hosted yt-dlp Flask server on same GCP VM
-//            configured via YOUTUBE_SEARCH_URL secret
-//            YouTube never blocks cloud IPs; audio URLs work with Modal.
-//
-//   All three return the same Track shape — frontend unchanged.
+// v6 — CURRENT: Three sources queried in PARALLEL, results MERGED.
+//   All three (JioSaavn, Gaana, YouTube) are called simultaneously on every
+//   search. Whatever comes back gets pooled together, deduplicated by ID,
+//   and ranked by the same relevance+popularity scoring — so the best
+//   result rises to the top regardless of which source it came from,
+//   and users can see multiple versions of a song side by side.
+//   YouTube's timeout tightened 30s -> 15s since it's now always in the
+//   critical path (not just an emergency fallback) — a slow/cold yt-dlp
+//   response can no longer hold up the whole search indefinitely. YouTube's
+//   own server-side 15-min cache means this only bites on genuinely novel
+//   queries nobody has searched yet.
 // =============================================================================
 
 // supabase/functions/search-music/index.ts
@@ -177,7 +181,8 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
       return null;
     }
     // Return null specifically when total === 0 — signals IP block, not a
-    // genuine empty query. Triggers cascade to Plan B.
+    // genuine empty query. Just means Plan A contributes nothing to the
+    // merged pool this time; Plan B and C run independently regardless.
     if (data.data.total === 0) return null;
     return data.data.results;
   } catch (err) {
@@ -194,7 +199,7 @@ async function searchPlanA(query: string): Promise<Track[]> {
   );
 
   if (pageResults.every(p => p === null)) {
-    console.log('[Plan A] all pages null/empty — cascading to Plan B');
+    console.log('[Plan A] all pages null/empty — contributing 0 results to merged pool');
     return [];
   }
 
@@ -278,7 +283,7 @@ async function searchPlanB(query: string): Promise<Track[]> {
     const rawList: any[] = Array.isArray(data) ? data : [];
 
     if (rawList.length === 0) {
-      console.log('[Plan B] Gaana returned empty — cascading to Plan C');
+      console.log('[Plan B] Gaana returned empty — contributing 0 results to merged pool');
       return [];
     }
 
@@ -335,7 +340,9 @@ async function searchPlanC(query: string): Promise<Track[]> {
   console.log('[Plan C] YouTube/yt-dlp query:', query);
   try {
     const url = `${ytBase.replace(/\/$/, '')}/search?query=${encodeURIComponent(query)}`;
-    const response = await timedFetch(url, 30000); // yt-dlp can take up to 20s
+    const response = await timedFetch(url, 15000); // tightened from 30s — always in
+    // the critical path now (parallel, not last-resort fallback); yt-dlp's own
+    // 15-min server-side cache means only genuinely novel queries hit this ceiling
     if (!response.ok) {
       console.error('[Plan C] error:', response.status);
       return [];
@@ -383,22 +390,27 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
   const queries = generateAlternativeQueries(originalQuery);
   console.log('Queries:', queries);
 
-  // ── Plan A ──
-  let allTracks = await searchPlanA(queries[0]);
-  if (allTracks.length < 5 && queries.length > 1) {
-    const remaining = await Promise.all(queries.slice(1).map(q => searchPlanA(q)));
-    allTracks = [...allTracks, ...remaining.flat()];
-  }
+  // Query all three sources IN PARALLEL and merge whatever comes back.
+  // Each source has its own internal timeout (Plan A ~8s default, Plan B
+  // 10s, Plan C 15s) so one slow source can't indefinitely block the
+  // others — the whole call resolves as soon as the slowest one finishes
+  // or times out, whichever comes first.
+  const [planAResults, planBResults, planCResults] = await Promise.all([
+    (async () => {
+      let results = await searchPlanA(queries[0]);
+      if (results.length < 5 && queries.length > 1) {
+        const remaining = await Promise.all(queries.slice(1).map(q => searchPlanA(q)));
+        results = [...results, ...remaining.flat()];
+      }
+      return results;
+    })(),
+    searchPlanB(queries[0]),
+    searchPlanC(queries[0]),
+  ]);
 
-  // ── Plan B — if Plan A came up empty ──
-  if (allTracks.length === 0) {
-    allTracks = await searchPlanB(queries[0]);
-  }
+  console.log(`Sources returned — JioSaavn: ${planAResults.length}, Gaana: ${planBResults.length}, YouTube: ${planCResults.length}`);
 
-  // ── Plan C — if Plan B also came up empty ──
-  if (allTracks.length === 0) {
-    allTracks = await searchPlanC(queries[0]);
-  }
+  const allTracks = [...planAResults, ...planBResults, ...planCResults];
 
   // Deduplicate by ID
   const seen = new Set<string>();
