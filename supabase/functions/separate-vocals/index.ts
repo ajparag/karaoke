@@ -1,19 +1,33 @@
 // =============================================================================
-// CHANGELOG
+// separate-vocals — Supabase Edge Function
 // =============================================================================
-// v1 (original) — Warmup only. Browser called Modal directly but was CORS-blocked.
+// CHANGELOG
+// v1 — Warmup only. Browser called Modal directly for actual separation,
+//      with MODAL_API_KEY hardcoded in client-side JS (useVocalSeparation.ts)
+//      — visible to anyone via dev tools/view-source. Also meant every
+//      unique browser paid Modal's GPU cost separately for the same song,
+//      even if thousands of other users had already sung it.
 //
-// v2-v4 — Attempted to proxy everything through edge function.
-//   Failed because Supabase edge functions cannot reliably make outbound
-//   TCP connections to Modal (upload times out after 30s every time).
-//
-// v5 — CURRENT: Warmup only (restored). Browser calls Modal directly.
-//   CORS is now handled by CORSMiddleware in modal_app.py, so the browser
-//   can upload, predict, and read SSE from Modal without CORS errors.
-//   The edge function only handles warmup (a lightweight GET, not an upload).
+// v2 — CURRENT: Added the `separate` action. This is now the ONLY path for
+//      running vocal separation — the browser never talks to Modal directly.
+//   - Modal's API key lives only here (server-side), never shipped to
+//     the client.
+//   - Checks Supabase Storage (bucket: separated-audio) for existing
+//     {trackId}/instrumental.mp3 + vocals.mp3 BEFORE calling Modal.
+//     Storage is a GLOBAL cache shared by every user — the first person to
+//     sing a song pays the Modal GPU cost, everyone after gets an instant
+//     Storage URL. This replaces the old per-browser IndexedDB cache
+//     (audioCache.ts), which only ever benefited the same device replaying
+//     the same song.
+//   - On a cache miss: calls Modal, downloads both stems server-side,
+//     uploads them to Storage, returns the new public Storage URLs.
+//   - Response shape kept identical to the old client-side flow
+//     ({ instrumentalUrl, vocalsUrl, fromCache }) so Sing.tsx/PartyStage.tsx
+//     need minimal changes.
 // =============================================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.89.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -25,8 +39,151 @@ const corsHeaders = {
 // actually wait on (solo singing, first party song). The BACKGROUND (T4)
 // tier used for silent party pre-separation warms up naturally on its
 // first real call; no need to proactively ping it.
-const MODAL_BASE = "https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run";
+const MODAL_URL_FAST = "https://ajparag--vocal-separator-v3-vocalseparatorfast-ui.modal.run";
+const MODAL_URL_BACKGROUND = "https://ajparag--vocal-separator-v3-vocalseparatorbackground-ui.modal.run";
 const MODAL_API_KEY = "pa_audio_vWyst7iiPDutgJL5n2zksWxWhZNJRY32";
+
+const STORAGE_BUCKET = "separated-audio";
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+// ─── Storage helpers ────────────────────────────────────────────────────────
+
+function storagePaths(trackId: string) {
+  return {
+    instrumental: `${trackId}/instrumental.mp3`,
+    vocals: `${trackId}/vocals.mp3`,
+  };
+}
+
+function publicUrl(supabaseUrl: string, path: string): string {
+  return `${supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+}
+
+// Checks whether both stems already exist in Storage for this track.
+// A HEAD-style existence check via list() rather than a full download —
+// cheap, just confirms the objects are there before trusting the URLs.
+async function checkStorageCache(
+  admin: ReturnType<typeof createClient>,
+  trackId: string,
+): Promise<{ instrumentalUrl: string; vocalsUrl: string } | null> {
+  const { data, error } = await admin.storage.from(STORAGE_BUCKET).list(trackId);
+  if (error || !data) return null;
+
+  const names = new Set(data.map((f) => f.name));
+  if (!names.has("instrumental.mp3") || !names.has("vocals.mp3")) return null;
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const paths = storagePaths(trackId);
+  return {
+    instrumentalUrl: publicUrl(supabaseUrl, paths.instrumental),
+    vocalsUrl: publicUrl(supabaseUrl, paths.vocals),
+  };
+}
+
+// Uploads both stems to Storage. Best-effort — if this fails, we still
+// return the (now-orphaned) Modal URLs to the client so the user isn't
+// blocked; the song just won't be cached for next time.
+async function uploadToStorageCache(
+  admin: ReturnType<typeof createClient>,
+  trackId: string,
+  instrumentalBytes: Uint8Array,
+  vocalsBytes: Uint8Array,
+): Promise<{ instrumentalUrl: string; vocalsUrl: string } | null> {
+  const paths = storagePaths(trackId);
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+
+  try {
+    const [instRes, vocRes] = await Promise.all([
+      admin.storage.from(STORAGE_BUCKET).upload(paths.instrumental, instrumentalBytes, {
+        contentType: "audio/mpeg",
+        upsert: true,
+      }),
+      admin.storage.from(STORAGE_BUCKET).upload(paths.vocals, vocalsBytes, {
+        contentType: "audio/mpeg",
+        upsert: true,
+      }),
+    ]);
+
+    if (instRes.error || vocRes.error) {
+      console.error("[separate-vocals] Storage upload failed:", instRes.error, vocRes.error);
+      return null;
+    }
+
+    return {
+      instrumentalUrl: publicUrl(supabaseUrl, paths.instrumental),
+      vocalsUrl: publicUrl(supabaseUrl, paths.vocals),
+    };
+  } catch (e) {
+    console.error("[separate-vocals] Storage upload exception:", e);
+    return null;
+  }
+}
+
+// ─── Modal call ───────────────────────────────────────────────────────────
+
+async function callModal(
+  audioUrl: string,
+  tier: "fast" | "background",
+): Promise<{ instrumentalBytes: Uint8Array; vocalsBytes: Uint8Array } | null> {
+  const modalBase = tier === "background" ? MODAL_URL_BACKGROUND : MODAL_URL_FAST;
+
+  console.log(`[separate-vocals] Calling Modal (${tier}):`, audioUrl.slice(0, 80));
+  const t0 = Date.now();
+
+  const resp = await fetch(`${modalBase}/separate-by-url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": MODAL_API_KEY },
+    body: JSON.stringify({ audio_url: audioUrl }),
+    signal: AbortSignal.timeout(120000), // 2 min — separation itself takes ~20-50s
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    console.error(`[separate-vocals] Modal error: ${resp.status} ${errText.slice(0, 200)}`);
+    return null;
+  }
+
+  const result = await resp.json();
+  const instPath = result?.instrumental_url;
+  const vocPath = result?.vocal_url;
+  if (!instPath) {
+    console.error("[separate-vocals] No instrumental_url in Modal response");
+    return null;
+  }
+
+  console.log(`[separate-vocals] Modal separation done in ${Date.now() - t0}ms, downloading stems...`);
+
+  // Modal's response paths are relative to Modal's own domain — fetch the
+  // actual file bytes from there so we can re-upload to Supabase Storage.
+  const [instResp, vocResp] = await Promise.all([
+    fetch(`${modalBase}${instPath}`, { headers: { "x-api-key": MODAL_API_KEY } }),
+    vocPath
+      ? fetch(`${modalBase}${vocPath}`, { headers: { "x-api-key": MODAL_API_KEY } })
+      : Promise.resolve(null),
+  ]);
+
+  if (!instResp.ok) {
+    console.error("[separate-vocals] Failed to download instrumental from Modal:", instResp.status);
+    return null;
+  }
+
+  const instrumentalBytes = new Uint8Array(await instResp.arrayBuffer());
+  const vocalsBytes = vocResp && vocResp.ok
+    ? new Uint8Array(await vocResp.arrayBuffer())
+    : new Uint8Array(0);
+
+  console.log(`[separate-vocals] Downloaded stems: inst=${Math.round(instrumentalBytes.length / 1024)}KB vocals=${Math.round(vocalsBytes.length / 1024)}KB`);
+
+  return { instrumentalBytes, vocalsBytes };
+}
+
+// ─── Handler ──────────────────────────────────────────────────────────────
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -37,43 +194,76 @@ serve(async (req) => {
     const body = await req.json();
     const { action } = body;
 
+    // ── Warmup (unchanged from v1) ──────────────────────────────────────────
     if (action === "warmup") {
       console.log("[separate-vocals] Warmup ping");
       try {
-        // Timeout must be long enough for @modal.enter() to complete:
-        // model load (~8s) + cuDNN warmup separation (~15s) = ~23s.
-        // 15s was too short — warmup returned ready=false while container
-        // was still booting, causing the cold start penalty to be paid
-        // during the real separation request instead.
-        const resp = await fetch(`${MODAL_BASE}/`, {
+        const resp = await fetch(`${MODAL_URL_FAST}/`, {
           signal: AbortSignal.timeout(45000),
           headers: { "x-api-key": MODAL_API_KEY },
         });
         console.log("[separate-vocals] Warmup status:", resp.status);
-        return new Response(
-          JSON.stringify({ ready: resp.ok }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return json({ ready: resp.ok });
       } catch (e) {
         console.warn("[separate-vocals] Warmup failed (non-critical):", e);
-        return new Response(
-          JSON.stringify({ ready: false }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return json({ ready: false });
       }
     }
 
-    return new Response(
-      JSON.stringify({ error: `Unknown action: ${action}` }),
-      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    // ── Separate — the new global-cache-aware flow ─────────────────────────
+    if (action === "separate") {
+      const audioUrl = body.audioUrl as string | undefined;
+      const trackId = body.trackId as string | undefined;
+      const tier = (body.tier === "background" ? "background" : "fast") as "fast" | "background";
+
+      if (!audioUrl || !trackId) {
+        return json({ error: "audioUrl and trackId are required" }, 400);
+      }
+
+      const admin = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      );
+
+      // 1. Check the global Storage cache first
+      const cached = await checkStorageCache(admin, trackId);
+      if (cached) {
+        console.log("[separate-vocals] Storage cache HIT for", trackId);
+        return json({ ...cached, fromCache: true });
+      }
+
+      console.log("[separate-vocals] Storage cache MISS for", trackId, "— calling Modal");
+
+      // 2. Cache miss — call Modal, download stems server-side
+      const stems = await callModal(audioUrl, tier);
+      if (!stems) {
+        return json({ error: "Vocal separation failed" }, 502);
+      }
+
+      // 3. Upload to Storage for every future user of this song
+      const uploaded = await uploadToStorageCache(admin, trackId, stems.instrumentalBytes, stems.vocalsBytes);
+
+      if (uploaded) {
+        return json({ ...uploaded, fromCache: false });
+      }
+
+      // Storage upload failed (rare) — fall back to returning the raw bytes
+      // as data URLs so the user isn't blocked, just not cached for next time.
+      console.warn("[separate-vocals] Storage upload failed, returning inline data URLs as fallback");
+      const instB64 = btoa(String.fromCharCode(...stems.instrumentalBytes));
+      const vocB64 = stems.vocalsBytes.length > 0 ? btoa(String.fromCharCode(...stems.vocalsBytes)) : null;
+      return json({
+        instrumentalUrl: `data:audio/mpeg;base64,${instB64}`,
+        vocalsUrl: vocB64 ? `data:audio/mpeg;base64,${vocB64}` : undefined,
+        fromCache: false,
+      });
+    }
+
+    return json({ error: `Unknown action: ${action}` }, 400);
 
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("[separate-vocals] Error:", msg);
-    return new Response(
-      JSON.stringify({ error: msg }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ error: msg }, 500);
   }
 });
