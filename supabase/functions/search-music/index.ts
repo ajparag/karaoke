@@ -525,6 +525,62 @@ async function searchTier2Only(originalQuery: string): Promise<Track[]> {
   return finalTracks;
 }
 
+// =============================================================================
+// FURTHER split: JioSaavn-only and Gaana-only, independently callable.
+//
+// Tier1 above already runs JioSaavn+Gaana in parallel — but it still
+// Promise.all's them together server-side, so the CLIENT doesn't see
+// anything until BOTH finish. If Gaana is slow (e.g. its Render free-tier
+// backend cold-starting after 15 min idle — a real, known 30-50s penalty,
+// not hypothetical), the whole tier1 response is gated on that even though
+// JioSaavn itself may have answered in 1-2s.
+//
+// These two let the CLIENT fire both in parallel and render each the
+// moment ITS OWN response lands — genuinely reduces time-to-first-result,
+// though NOT total time for everything to finish (that's still bounded by
+// whichever source is actually slowest; no way around that without fixing
+// the slow source itself).
+// =============================================================================
+
+const jioSaavnOnlyCache = new Map<string, { tracks: Track[]; ts: number }>();
+const gaanaOnlyCache = new Map<string, { tracks: Track[]; ts: number }>();
+
+async function searchJioSaavnOnly(originalQuery: string): Promise<Track[]> {
+  const normalizedForCache = normalizeQuery(originalQuery);
+  const cached = jioSaavnOnlyCache.get(normalizedForCache);
+  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+    console.log('[JioSaavn-only] Search cache HIT:', normalizedForCache);
+    return cached.tracks;
+  }
+
+  const queries = generateAlternativeQueries(originalQuery);
+  let results = await searchJioSaavn(queries[0]);
+  if (results.length < 5 && queries.length > 1) {
+    const remaining = await Promise.all(queries.slice(1).map(q => searchJioSaavn(q)));
+    results = [...results, ...remaining.flat()];
+  }
+
+  const finalTracks = dedupeAndRank(results, normalizedForCache);
+  jioSaavnOnlyCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
+  return finalTracks;
+}
+
+async function searchGaanaOnly(originalQuery: string): Promise<Track[]> {
+  const normalizedForCache = normalizeQuery(originalQuery);
+  const cached = gaanaOnlyCache.get(normalizedForCache);
+  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+    console.log('[Gaana-only] Search cache HIT:', normalizedForCache);
+    return cached.tracks;
+  }
+
+  const queries = generateAlternativeQueries(originalQuery);
+  const results = await searchGaana(queries[0]);
+
+  const finalTracks = dedupeAndRank(results, normalizedForCache);
+  gaanaOnlyCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
+  return finalTracks;
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -556,6 +612,24 @@ serve(async (req) => {
     //   to before this change. Existing callers (PartyStage.tsx,
     //   PartyQueue.tsx) haven't been updated to the tiered flow yet and
     //   keep working exactly as they did.
+    if (tier === 'jiosaavn') {
+      const tracks = await searchJioSaavnOnly(trimmed);
+      console.log(`[JioSaavn-only] Returning ${tracks.length} tracks`);
+      return new Response(
+        JSON.stringify({ tracks }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (tier === 'gaana') {
+      const tracks = await searchGaanaOnly(trimmed);
+      console.log(`[Gaana-only] Returning ${tracks.length} tracks`);
+      return new Response(
+        JSON.stringify({ tracks }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     if (tier === 'tier1') {
       const { tracks, shouldFetchMore } = await searchTier1Only(trimmed);
       console.log(`[Tier1] Returning ${tracks.length} tracks, shouldFetchMore: ${shouldFetchMore}`);
