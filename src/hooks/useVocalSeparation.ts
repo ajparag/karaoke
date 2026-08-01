@@ -23,6 +23,13 @@
 //     it still matters for preventing duplicate simultaneous edge function
 //     calls from the same browser tab (e.g. a party host singing while
 //     background pre-separation races for the same track).
+//
+// v7 — CURRENT: separateVocals accepts an optional songMeta param
+//   ({ title, artist, durationSeconds }), forwarded to the edge function
+//   so it can compute a CANONICAL Storage cache key instead of the raw
+//   trackId. Lets the same song picked from a different source (different
+//   trackId, same recording) hit the shared global cache instead of
+//   triggering a redundant Modal separation.
 // =============================================================================
 
 import { useState, useCallback, useRef } from 'react';
@@ -175,10 +182,15 @@ export function useVocalSeparation() {
   const [activeTier, setActiveTier] = useState<SeparationTier>('fast');
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const separateVocals = useCallback(async (audioUrl: string, tier: SeparationTier = 'fast', trackId?: string): Promise<SeparationResult | null> => {
-    // trackId is required now -- it's the Storage cache key server-side.
-    // Falls back to a hash-free slice of audioUrl only in the unlikely case
-    // a caller doesn't have one yet, but every real call site passes it.
+  const separateVocals = useCallback(async (
+    audioUrl: string,
+    tier: SeparationTier = 'fast',
+    trackId?: string,
+    songMeta?: { title: string; artist: string; durationSeconds: number },
+  ): Promise<SeparationResult | null> => {
+    // trackId is required now -- it's the fallback Storage cache key
+    // server-side if songMeta isn't provided. Falls back to a hash-free
+    // slice of audioUrl only in the unlikely case a caller has neither.
     const cacheKey = trackId ?? audioUrl;
     setIsProcessing(true);
     setProgress('Starting AI separation...');
@@ -187,7 +199,10 @@ export function useVocalSeparation() {
     // Deduplicate FIRST, before any await. Same rationale as before: two
     // callers for the same track (e.g. party pre-separation + the singer's
     // own Play tap) must share one in-flight edge function call, not fire
-    // two separate ones.
+    // two separate ones. Keyed on trackId (not the canonical song key) --
+    // this only needs to prevent duplicate calls for the exact same
+    // selection within one browser tab, not model the server's
+    // cross-source cache sharing.
     const existing = separationPromiseCache.get(cacheKey);
     if (existing) {
       setActiveTier(existing.tier);
@@ -218,10 +233,26 @@ export function useVocalSeparation() {
       sepLog('SEP', `Using ${tier.toUpperCase()} tier`);
 
       // Single call to the edge function. It internally checks the global
-      // Storage cache first, and only calls Modal on a genuine miss --
-      // this hook has no visibility into (or need to know) which happened.
+      // Storage cache first (keyed by song identity, not just this exact
+      // trackId -- see songMeta below), and only calls Modal on a genuine
+      // miss. This hook has no visibility into (or need to know) which
+      // happened.
+      //
+      // songMeta (title/artist/durationSeconds) lets the edge function
+      // compute a CANONICAL cache key so the same song picked from a
+      // different source (JioSaavn vs Gaana vs YouTube -- different
+      // trackId, same recording) still hits the shared Storage cache
+      // instead of triggering a redundant Modal separation.
       const { data, error: fnError } = await supabase.functions.invoke('separate-vocals', {
-        body: { action: 'separate', audioUrl, trackId: cacheKey, tier },
+        body: {
+          action: 'separate',
+          audioUrl,
+          trackId: cacheKey,
+          tier,
+          title: songMeta?.title,
+          artist: songMeta?.artist,
+          durationSeconds: songMeta?.durationSeconds,
+        },
       });
 
       if (fnError) throw new Error(fnError.message || 'Separation request failed');
