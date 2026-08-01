@@ -160,36 +160,70 @@ const Index = () => {
     setHasSearched(true);
     setTracks([]);
 
+    const seenIds = new Set<string>();
+    let jioSaavnCount = 0;
+    let gaanaCount = 0;
+    let firstResultShown = false;
+
+    // Appends new results to whatever's already on screen — never replaces
+    // or re-sorts the existing list, so nothing jumps around while the
+    // user is looking at it. Whichever source answers first is what
+    // appears first.
+    const appendTracks = (newTracks: Track[]) => {
+      const filtered = newTracks.filter((t: Track) => !seenIds.has(t.id));
+      filtered.forEach((t: Track) => seenIds.add(t.id));
+      if (filtered.length === 0) return;
+      setTracks(prev => [...prev, ...filtered]);
+      if (!firstResultShown) {
+        firstResultShown = true;
+        setIsLoading(false); // clear the spinner the instant ANY source responds
+      }
+    };
+
     try {
-      // Tier 1: JioSaavn + Gaana — both fast, render the instant this returns
-      // instead of waiting for a possible YouTube fallback too.
-      const { data: tier1Data, error: tier1Error } = await supabase.functions.invoke('search-music', {
-        body: { query: trimmed, tier: 'tier1' },
-      });
-      if (tier1Error) throw tier1Error;
+      // JioSaavn and Gaana fired as two INDEPENDENT calls (not one call
+      // that internally waits for both) — each renders the moment its own
+      // response lands. Previously both were bundled into a single tier1
+      // call that blocked on whichever was slower; if Gaana's Render
+      // backend has cold-started after being idle, that alone could add
+      // 30-50s to every search regardless of how fast JioSaavn answered.
+      await Promise.all([
+        supabase.functions.invoke('search-music', { body: { query: trimmed, tier: 'jiosaavn' } })
+          .then(({ data, error }) => {
+            if (error) { console.warn('[Index] JioSaavn search failed (non-fatal):', error); return; }
+            const tracks: Track[] = data?.tracks ?? [];
+            jioSaavnCount = tracks.length;
+            appendTracks(tracks);
+          })
+          .catch(err => console.warn('[Index] JioSaavn search failed (non-fatal):', err)),
 
-      const tier1Tracks = tier1Data?.tracks ?? [];
-      setTracks(tier1Tracks);
-      setIsLoading(false);
+        supabase.functions.invoke('search-music', { body: { query: trimmed, tier: 'gaana' } })
+          .then(({ data, error }) => {
+            if (error) { console.warn('[Index] Gaana search failed (non-fatal):', error); return; }
+            const tracks: Track[] = data?.tracks ?? [];
+            gaanaCount = tracks.length;
+            appendTracks(tracks);
+          })
+          .catch(err => console.warn('[Index] Gaana search failed (non-fatal):', err)),
+      ]);
 
-      // Tier 2: YouTube — only fetched if tier1 said it's worth it (thin
-      // results). Appended to the BOTTOM of the already-rendered list
-      // rather than triggering a full re-sort, so results already on
-      // screen don't jump around while the user is looking at them.
-      if (tier1Data?.shouldFetchMore) {
+      setIsLoading(false); // covers the case where neither source returned anything
+
+      // Same "fewer than 5 combined results" threshold used server-side
+      // for the legacy path — tested in search-fallback-threshold.test.ts.
+      // Duplicated here (not imported) since client and edge function are
+      // different runtimes; kept in sync manually.
+      const MIN_RESULTS_BEFORE_YOUTUBE = 5;
+      if (jioSaavnCount + gaanaCount < MIN_RESULTS_BEFORE_YOUTUBE) {
         setIsLoadingMore(true);
         try {
-          const { data: tier2Data, error: tier2Error } = await supabase.functions.invoke('search-music', {
+          const { data, error } = await supabase.functions.invoke('search-music', {
             body: { query: trimmed, tier: 'tier2' },
           });
-          if (!tier2Error && tier2Data?.tracks?.length) {
-            // Dedupe against whatever tier1 already showed, just in case
-            const existingIds = new Set(tier1Tracks.map((t: Track) => t.id));
-            const newTracks = tier2Data.tracks.filter((t: Track) => !existingIds.has(t.id));
-            setTracks(prev => [...prev, ...newTracks]);
+          if (!error && data?.tracks?.length) {
+            appendTracks(data.tracks);
           }
         } catch (err) {
-          // Tier 2 failing is non-fatal — tier1 results are already shown
           console.warn('[Index] Tier 2 (YouTube) search failed (non-fatal):', err);
         } finally {
           setIsLoadingMore(false);
