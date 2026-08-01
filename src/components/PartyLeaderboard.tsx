@@ -14,7 +14,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { Trophy, Medal, Award, Mic2, Music } from "lucide-react";
+import { Trophy, Mic2, Music } from "lucide-react";
 
 interface PartyScore {
   id: string;
@@ -45,17 +45,6 @@ const RATING_COLOR: Record<string, string> = {
   D: "text-score-ok",
   F: "text-score-miss",
 };
-
-function RankIcon({ index }: { index: number }) {
-  if (index === 0) return <Trophy className="h-5 w-5 text-yellow-400" />;
-  if (index === 1) return <Medal className="h-5 w-5 text-slate-400" />;
-  if (index === 2) return <Award className="h-5 w-5 text-amber-600" />;
-  return (
-    <span className="text-sm font-bold text-muted-foreground w-5 text-center">
-      {index + 1}
-    </span>
-  );
-}
 
 function Avatar({ name, index }: { name: string; index: number }) {
   const letter = name.charAt(0).toUpperCase();
@@ -176,9 +165,9 @@ export function PartyLeaderboard({ stageId, currentSingerName, isPartyActive = t
               <div className="space-y-2 mb-6">
                 {leaderboard.slice(1, 3).map((s, i) => (
                   <div key={s.name} className="flex items-center gap-3 bg-muted/50 rounded-xl px-4 py-2">
-                    <RankIcon index={i + 1} />
+                    <span className="text-xs text-muted-foreground/60 w-5 text-center shrink-0">#{i + 2}</span>
                     <span className="flex-1 text-left font-medium text-sm">{s.name}</span>
-                    <span className="text-sm text-muted-foreground">{s.totalScore.toLocaleString()}</span>
+                    <span className="text-base font-bold text-primary">{s.totalScore.toLocaleString()}</span>
                   </div>
                 ))}
               </div>
@@ -227,9 +216,6 @@ export function PartyLeaderboard({ stageId, currentSingerName, isPartyActive = t
                   i === 0 ? "bg-yellow-400/5" : "hover:bg-muted/40"
                 }`}
               >
-                <div className="w-6 flex justify-center shrink-0">
-                  <RankIcon index={i} />
-                </div>
                 <Avatar name={singer.name} index={i} />
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-sm truncate">{singer.name}</p>
@@ -238,9 +224,14 @@ export function PartyLeaderboard({ stageId, currentSingerName, isPartyActive = t
                     <span className={RATING_COLOR[singer.bestRating]}>{singer.bestRating}</span>
                   </p>
                 </div>
-                <p className="font-bold text-sm shrink-0">
-                  {singer.totalScore.toLocaleString()}
-                </p>
+                {/* Score is the hero — large, bold, on top. Rank is a small
+                    muted tag underneath — context, not the focus. */}
+                <div className="flex flex-col items-end gap-0.5 shrink-0">
+                  <p className="text-xl font-bold text-primary leading-none">
+                    {singer.totalScore.toLocaleString()}
+                  </p>
+                  <span className="text-[10px] text-muted-foreground/50 leading-none">#{i + 1}</span>
+                </div>
               </div>
             ))
           )}
@@ -262,10 +253,10 @@ export function PartyLeaderboard({ stageId, currentSingerName, isPartyActive = t
                     </p>
                   </div>
                   <div className="text-right shrink-0">
-                    <p className={`font-bold text-sm leading-tight ${RATING_COLOR[s.rating] || ""}`}>
+                    <p className="font-bold text-sm leading-tight text-primary">{s.score}</p>
+                    <p className={`text-[10px] leading-tight ${RATING_COLOR[s.rating] || 'text-muted-foreground'}`}>
                       {s.rating}
                     </p>
-                    <p className="text-xs text-muted-foreground leading-tight">{s.score}</p>
                   </div>
                 </div>
               ))}
