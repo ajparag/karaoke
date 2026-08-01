@@ -146,7 +146,11 @@ export default function PartyStage() {
     preSeparatedRef.current.add(next.id);
 
     // Background T4 tier — nobody actively waiting on this one yet.
-    separateVocals(next.audio_url, 'background', next.track_id)
+    separateVocals(next.audio_url, 'background', next.track_id, {
+      title: next.song_title,
+      artist: next.song_artist ?? '',
+      durationSeconds: next.duration_seconds ?? 0,
+    })
       .then(result => {
         if (result) console.log('[Party] Pre-separated:', next.song_title, result.fromCache ? '(Storage cache hit)' : '(fresh)');
       })

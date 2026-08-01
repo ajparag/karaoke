@@ -205,7 +205,14 @@ const Index = () => {
     // the warmup ping is lightweight and harmless even on a Storage cache
     // hit (the edge function just won't end up needing Modal at all).
     warmUpModal();
-    separateVocals(track.audioUrl, 'fast', track.id);
+    // songMeta lets the edge function compute a canonical cache key
+    // (title+artist+duration) so this song hits the shared Storage cache
+    // even if it was already separated from a different source earlier.
+    separateVocals(track.audioUrl, 'fast', track.id, {
+      title: track.title,
+      artist: track.artist,
+      durationSeconds: parseDurationToSeconds(track.duration) ?? 0,
+    });
 
     navigate(`/sing/${track.id}`);
   }, [navigate, separateVocals]);
