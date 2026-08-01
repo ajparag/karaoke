@@ -24,18 +24,6 @@
 //   - Response shape kept identical to the old client-side flow
 //     ({ instrumentalUrl, vocalsUrl, fromCache }) so Sing.tsx/PartyStage.tsx
 //     need minimal changes.
-//
-// v3 — CURRENT: Storage cache key switched from raw trackId to a CANONICAL
-//   key (title+artist+duration-bucket) via canonicalTrackKey(). JioSaavn,
-//   Gaana, and YouTube each mint their own unique ID for what is often the
-//   exact same commercial recording — under the old trackId-keyed scheme,
-//   three users picking "Tum Hi Ho" from three different sources each
-//   triggered a separate Modal separation for functionally identical
-//   audio. Now they all share one Storage entry. Duration is bucketed to
-//   the nearest 10s (not ignored) so a genuinely different edit — Unplugged,
-//   Remix, a radio cut — still gets its own cache entry rather than
-//   incorrectly reusing stems that would desync from a differently-timed
-//   recording. Falls back to raw trackId if title/artist aren't provided.
 // =============================================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -97,63 +85,6 @@ function isValidTrackId(trackId: string): boolean {
   // use (JioSaavn hashes, Gaana numeric IDs, YouTube video IDs) — no
   // slashes, no query characters, no path traversal sequences.
   return /^[A-Za-z0-9_-]+$/.test(trackId);
-}
-
-// Canonicalizes a song by title+artist+duration instead of the raw,
-// source-specific trackId. JioSaavn, Gaana, and YouTube each mint their
-// own unique ID for what is very often the exact same commercial
-// recording — without this, three users picking "Tum Hi Ho" from three
-// different sources would each pay Modal's GPU cost separately for
-// functionally identical audio.
-//
-// Duration is bucketed to the nearest 10 seconds rather than dropped
-// entirely: minor metadata variance across sources (album grouping,
-// rounding differences) still lands in the same bucket, but a genuinely
-// different edit/version — Unplugged, Remix, a radio edit — which differs
-// in length by more than a few seconds gets its OWN cache entry. Reusing
-// stems across a different-length recording would desync the lyrics/pitch
-// guide from audio that doesn't actually match it.
-function canonicalTrackKey(title: string, artist: string, durationSeconds: number): string | null {
-  const stripNoise = (s: string) => s
-    .toLowerCase()
-    .replace(/\(from\s+["'].*?["']\)/gi, '')            // "(From "Movie Name")"
-    .replace(/\s*-\s*from\s+["'].*?["']/gi, '')           // "- From "Movie Name""
-    .replace(/\(original\s+motion\s+picture.*?\)/gi, '')  // "(Original Motion Picture Soundtrack)"
-    .replace(/\s*-\s*single\s*$/gi, '')
-    .replace(/["']/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  // Deliberately does NOT strip Unplugged/Remix/Live/Reprise/etc — those
-  // terms indicate a genuinely different recording and must keep producing
-  // a different canonical key (see calculateRelevanceScore's DEMOTE_KEYWORDS
-  // in search-music/index.ts for the same list, applied for a different
-  // reason there — ranking rather than cache identity).
-
-  const normTitle = stripNoise(title);
-  const normArtist = stripNoise(artist).split(/[,&]/)[0].trim(); // primary artist only — featured artists vary by source
-
-  const slug = `${normTitle}__${normArtist}`
-    .replace(/[^a-z0-9_]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-
-  // Guard against degenerate slugs from garbage/punctuation-only input.
-  // e.g. title="!!!" artist="???" strips down to a near-empty slug like
-  // "__" — which still PASSES isValidTrackId's character-set regex
-  // (underscores are allowed), so the caller's fallback-to-trackId check
-  // never fires. Two unrelated garbage-titled tracks with similar
-  // durations would then silently collide under the same cache key.
-  // Require a minimum amount of real alphanumeric content before trusting
-  // this as a cache key at all — return null to force the caller back to
-  // the (guaranteed-unique) raw trackId instead.
-  const alnumCount = (slug.match(/[a-z0-9]/g) || []).length;
-  if (alnumCount < 3) return null;
-
-  const durationBucket = Number.isFinite(durationSeconds) && durationSeconds > 0
-    ? Math.round(durationSeconds / 10) * 10
-    : 0; // no duration provided — falls back to a single shared bucket for this title+artist
-
-  return `${slug}__${durationBucket}s`;
 }
 
 // ─── Storage helpers ────────────────────────────────────────────────────────
@@ -324,9 +255,6 @@ serve(async (req) => {
     if (action === "separate") {
       const audioUrl = body.audioUrl as string | undefined;
       const trackId = body.trackId as string | undefined;
-      const title = (body.title as string | undefined) ?? "";
-      const artist = (body.artist as string | undefined) ?? "";
-      const durationSeconds = Number(body.durationSeconds) || 0;
       const tier = (body.tier === "background" ? "background" : "fast") as "fast" | "background";
 
       if (!audioUrl || !trackId) {
@@ -337,31 +265,19 @@ serve(async (req) => {
         return json({ error: "Invalid trackId format" }, 400);
       }
 
-      // Cache key is the CANONICAL song identity (title+artist+duration
-      // bucket), not the raw source-specific trackId. This is what lets
-      // the same song picked from JioSaavn, Gaana, or YouTube all share
-      // one Storage entry instead of three. Falls back to trackId itself
-      // if title/artist weren't provided, OR if canonicalTrackKey rejected
-      // them as too degenerate to trust (garbage/punctuation-only input —
-      // see the alnumCount guard inside canonicalTrackKey) — still
-      // functionally correct in both cases, just without the cross-source
-      // sharing benefit for that particular request.
-      const computedKey = title && artist ? canonicalTrackKey(title, artist, durationSeconds) : null;
-      const effectiveKey = computedKey && isValidTrackId(computedKey) ? computedKey : trackId;
-
       const admin = createClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
       );
 
       // 1. Check the global Storage cache first
-      const cached = await checkStorageCache(admin, effectiveKey);
+      const cached = await checkStorageCache(admin, trackId);
       if (cached) {
-        console.log("[separate-vocals] Storage cache HIT for", effectiveKey, `(trackId: ${trackId})`);
+        console.log("[separate-vocals] Storage cache HIT for", trackId);
         return json({ ...cached, fromCache: true });
       }
 
-      console.log("[separate-vocals] Storage cache MISS for", effectiveKey, "— calling Modal");
+      console.log("[separate-vocals] Storage cache MISS for", trackId, "— calling Modal");
 
       // 2. Cache miss — call Modal, download stems server-side
       const stems = await callModal(audioUrl, tier);
@@ -369,10 +285,8 @@ serve(async (req) => {
         return json({ error: "Vocal separation failed" }, 502);
       }
 
-      // 3. Upload to Storage under the CANONICAL key — so the next user who
-      // picks this same song from ANY source (not just this one) gets an
-      // instant cache hit.
-      const uploaded = await uploadToStorageCache(admin, effectiveKey, stems.instrumentalBytes, stems.vocalsBytes);
+      // 3. Upload to Storage for every future user of this song
+      const uploaded = await uploadToStorageCache(admin, trackId, stems.instrumentalBytes, stems.vocalsBytes);
 
       if (uploaded) {
         return json({ ...uploaded, fromCache: false });
