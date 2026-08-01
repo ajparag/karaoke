@@ -504,7 +504,15 @@ const Sing = () => {
   useEffect(() => {
     if (!isPlaying || !isMicActive) return;
     const handleMetrics = (m: typeof metrics) => {
-      if (!m.referenceActive) return;
+      // Was only checking referenceActive. Inside useVocalsComparison the
+      // EMAs correctly FREEZE (stop updating) when the user goes silent —
+      // but this loop kept firing every 200ms regardless and re-adding
+      // whatever the last frozen values were into the running average.
+      // Result: sing well for a moment, then go silent for the rest of a
+      // 4-minute song, and the score stays propped at that early peak
+      // forever instead of reflecting that singing actually stopped.
+      // Silence must contribute NOTHING — not even repeated stale credit.
+      if (!m.referenceActive || !m.isVoiceDetected) return;
       scoreAccumulatorRef.current.accuracy   += m.pitchMatch;
       scoreAccumulatorRef.current.flow       += m.rhythmMatch;
       scoreAccumulatorRef.current.expression += m.techniqueMatch;
