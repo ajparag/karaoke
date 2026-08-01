@@ -320,11 +320,7 @@ const Sing = () => {
     if (isTestPlayerMode || !track?.audioUrl || separatedAudio || isLoadingFromCache) return;
     if (separationTriggeredRef.current === track.audioUrl) return;
     separationTriggeredRef.current = track.audioUrl;
-    loadFromCache(track.audioUrl, 'fast', track.id, {
-      title: track.title,
-      artist: track.artist,
-      durationSeconds: trackDurationSecs,
-    });
+    loadFromCache(track.audioUrl, 'fast', track.id);
   }, [track?.audioUrl, separatedAudio, isLoadingFromCache, loadFromCache, isTestPlayerMode]);
 
   // ── Per-track guard reset ───────────────────────────────────────────────────
