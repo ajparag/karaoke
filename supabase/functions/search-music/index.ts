@@ -11,31 +11,22 @@
 //
 // v4 — Optimized for speed — parallel queries + in-memory cache.
 //
-// v5 — Three-tier CASCADE — JioSaavn → self-hosted wrapper → YouTube.
+// v5 — CURRENT: Three-tier cascade — JioSaavn → self-hosted wrapper → YouTube
 //   Root cause of v4 failure: JioSaavn blocks cloud IPs silently — returns
 //   { total: 0, results: [] } with a 200 OK, indistinguishable from a real
 //   zero-match search. All cloud providers affected: GCP, AWS, Render, Railway.
-//   Cascade logic: only tried Plan B if Plan A was empty, only tried Plan C
-//   if Plan B was also empty. Good for resilience, bad for breadth — users
-//   only ever saw ONE source's results, even when the others had different
-//   or better versions of the same song.
 //
-// v6 — Three sources queried in PARALLEL, results MERGED, all on every
-//   search. All three (JioSaavn, Gaana, YouTube) called simultaneously every
-//   time. Whatever came back got pooled together, deduplicated by ID, and
-//   ranked by the same relevance+popularity scoring.
-//   Problem: YouTube (yt-dlp) is meaningfully slower than the other two —
-//   up to 15s on a genuinely novel query — and including it in EVERY
-//   search added real, noticeable buffering time even when JioSaavn+Gaana
-//   alone already had plenty of good results.
+//   Cascade logic (simple — zero results triggers next tier):
+//   Plan A: saavn.sumit.co (best metadata, play counts, language fields)
+//   Plan B: GaanaPy on Render (gaanapy-2ta9.onrender.com)
+//            fork of ZingyTomato/GaanaPy — different source, different IP
+//            configured via GAANA_API_URL secret
+//            returns HLS stream URLs, signed tokens expire in ~4hrs
+//   Plan C: self-hosted yt-dlp Flask server on same GCP VM
+//            configured via YOUTUBE_SEARCH_URL secret
+//            YouTube never blocks cloud IPs; audio URLs work with Modal.
 //
-// v7 — CURRENT: Two-tier instead of flat three-way parallel.
-//   Tier 1 (always): JioSaavn + Gaana in parallel — both fast (~1-3s), no
-//     latency cost to always querying both.
-//   Tier 2 (fallback only): YouTube — only called when Tier 1's combined
-//     result count is below MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK (5). Most
-//     searches never touch YouTube at all and stay fast; only genuinely
-//     thin searches pay the extra latency to find more results.
+//   All three return the same Track shape — frontend unchanged.
 // =============================================================================
 
 // supabase/functions/search-music/index.ts
@@ -164,7 +155,7 @@ function generateAlternativeQueries(query: string): string[] {
   return Array.from(alts).slice(0, 3);
 }
 
-// ─── JioSaavn: saavn.sumit.co ────────────────────────────────────────────────
+// ─── Plan A: saavn.sumit.co ────────────────────────────────────────────────
 
 const SAAVN_API_BASE = 'https://saavn.sumit.co/api';
 
@@ -186,8 +177,7 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
       return null;
     }
     // Return null specifically when total === 0 — signals IP block, not a
-    // genuine empty query. Just means Plan A contributes nothing to the
-    // merged pool this time; Plan B and C run independently regardless.
+    // genuine empty query. Triggers cascade to Plan B.
     if (data.data.total === 0) return null;
     return data.data.results;
   } catch (err) {
@@ -196,15 +186,15 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
   }
 }
 
-async function searchJioSaavn(query: string): Promise<Track[]> {
-  console.log('[JioSaavn] saavn.sumit.co query:', query);
+async function searchPlanA(query: string): Promise<Track[]> {
+  console.log('[Plan A] saavn.sumit.co query:', query);
   const PAGES_TO_FETCH = 4;
   const pageResults = await Promise.all(
     Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
   );
 
   if (pageResults.every(p => p === null)) {
-    console.log('[JioSaavn] all pages null/empty — contributing 0 results to merged pool');
+    console.log('[Plan A] all pages null/empty — cascading to Plan B');
     return [];
   }
 
@@ -258,7 +248,7 @@ async function searchJioSaavn(query: string): Promise<Track[]> {
   });
 }
 
-// ─── Gaana: GaanaPy (gaanapy-2ta9.onrender.com) ─────────────────────────
+// ─── Plan B: GaanaPy (gaanapy-2ta9.onrender.com) ─────────────────────────
 //
 // Self-hosted fork of ZingyTomato/GaanaPy deployed on Render.
 // Returns HLS stream URLs (signed, expire in ~4hrs) — acceptable since
@@ -268,19 +258,19 @@ async function searchJioSaavn(query: string): Promise<Track[]> {
 // the first part for ranking.
 // Configured via GAANA_API_URL secret.
 
-async function searchGaana(query: string): Promise<Track[]> {
+async function searchPlanB(query: string): Promise<Track[]> {
   const gaanaBase = Deno.env.get('GAANA_API_URL');
   if (!gaanaBase) {
-    console.log('[Gaana] GAANA_API_URL not set — skipping');
+    console.log('[Plan B] GAANA_API_URL not set — skipping');
     return [];
   }
 
-  console.log('[Gaana] Gaana query:', query);
+  console.log('[Plan B] Gaana query:', query);
   try {
     const url = `${gaanaBase.replace(/\/$/, '')}/songs/search?query=${encodeURIComponent(query)}&limit=20`;
     const response = await timedFetch(url, 10000);
     if (!response.ok) {
-      console.error('[Gaana] Gaana error:', response.status);
+      console.error('[Plan B] Gaana error:', response.status);
       return [];
     }
 
@@ -288,11 +278,11 @@ async function searchGaana(query: string): Promise<Track[]> {
     const rawList: any[] = Array.isArray(data) ? data : [];
 
     if (rawList.length === 0) {
-      console.log('[Gaana] Gaana returned empty — contributing 0 results to merged pool');
+      console.log('[Plan B] Gaana returned empty — cascading to Plan C');
       return [];
     }
 
-    console.log(`[Gaana] Gaana returned ${rawList.length} results`);
+    console.log(`[Plan B] Gaana returned ${rawList.length} results`);
     return rawList
       .filter((s: any) => s?.stream_urls?.urls?.very_high_quality || s?.stream_urls?.urls?.high_quality)
       .map((s: any): Track => {
@@ -328,38 +318,36 @@ async function searchGaana(query: string): Promise<Track[]> {
         };
       });
   } catch (err) {
-    console.error('[Gaana] Gaana fetch error:', err);
+    console.error('[Plan B] Gaana fetch error:', err);
     return [];
   }
 }
 
-// ─── YouTube: self-hosted yt-dlp Flask server ──────────────────────────────
+// ─── Plan C: self-hosted yt-dlp Flask server ──────────────────────────────
 
-async function searchYouTube(query: string): Promise<Track[]> {
+async function searchPlanC(query: string): Promise<Track[]> {
   const ytBase = Deno.env.get('YOUTUBE_SEARCH_URL');
   if (!ytBase) {
-    console.log('[YouTube] YOUTUBE_SEARCH_URL not set — skipping');
+    console.log('[Plan C] YOUTUBE_SEARCH_URL not set — skipping');
     return [];
   }
 
-  console.log('[YouTube] YouTube/yt-dlp query:', query);
+  console.log('[Plan C] YouTube/yt-dlp query:', query);
   try {
     const url = `${ytBase.replace(/\/$/, '')}/search?query=${encodeURIComponent(query)}`;
-    const response = await timedFetch(url, 15000); // tightened from 30s — always in
-    // the critical path now (parallel, not last-resort fallback); yt-dlp's own
-    // 15-min server-side cache means only genuinely novel queries hit this ceiling
+    const response = await timedFetch(url, 30000); // yt-dlp can take up to 20s
     if (!response.ok) {
-      console.error('[YouTube] error:', response.status);
+      console.error('[Plan C] error:', response.status);
       return [];
     }
 
     const data = await response.json();
     if (!Array.isArray(data)) {
-      console.error('[YouTube] unexpected response shape');
+      console.error('[Plan C] unexpected response shape');
       return [];
     }
 
-    console.log(`[YouTube] returned ${data.length} results`);
+    console.log(`[Plan C] returned ${data.length} results`);
     return data
       .filter((t: any) => t?.id && t?.audioUrl && t?.title)
       .map((t: any): Track => ({
@@ -374,7 +362,7 @@ async function searchYouTube(query: string): Promise<Track[]> {
         playCount: typeof t.playCount === 'number' ? t.playCount : 0,
       }));
   } catch (err) {
-    console.error('[YouTube] fetch error:', err);
+    console.error('[Plan C] fetch error:', err);
     return [];
   }
 }
@@ -383,48 +371,6 @@ async function searchYouTube(query: string): Promise<Track[]> {
 
 const searchCache = new Map<string, { tracks: Track[]; ts: number }>();
 const SEARCH_CACHE_TTL_MS = 15 * 60 * 1000;
-
-// MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK: if JioSaavn+Gaana together already
-// return this many results, skip YouTube. YouTube (via yt-dlp) is
-// meaningfully slower than the other two — up to 15s on a genuinely novel
-// query. Shared by both the legacy combined path and the new tiered path
-// below, so the threshold can never drift out of sync between the two.
-const MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK = 5;
-
-// Shared by every search path — dedupes by ID and ranks by the same
-// relevance+popularity scoring, regardless of which source(s) the pool
-// came from. Kept as one function so tier1-only, tier2-only, and the
-// legacy combined path can never silently apply different ranking logic.
-function dedupeAndRank(tracks: Track[], normalizedForCache: string): Track[] {
-  const seen = new Set<string>();
-  const unique: Track[] = [];
-  for (const t of tracks) {
-    if (!seen.has(t.id)) { seen.add(t.id); unique.push(t); }
-  }
-
-  const scored = unique
-    .map(t => ({ t, score: calculateRelevanceScore(normalizedForCache, t) }))
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return (b.t.playCount || 0) - (a.t.playCount || 0);
-    });
-
-  console.log('Top 5 results:');
-  scored.slice(0, 5).forEach(({ t, score }) => {
-    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(12)} | ${t.source} | ${t.title} — ${t.artist}`);
-  });
-
-  return scored.map(({ t }) => t);
-}
-
-// =============================================================================
-// LEGACY combined path — UNCHANGED from before this update.
-// Still used whenever the request omits `tier` entirely. Kept fully intact
-// so any caller that hasn't been updated to the new tiered flow (currently:
-// PartyStage.tsx, PartyQueue.tsx) keeps working exactly as it did before —
-// this update is purely additive, nothing about this function's behavior
-// changed.
-// =============================================================================
 
 async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> {
   const normalizedForCache = normalizeQuery(originalQuery);
@@ -437,147 +383,45 @@ async function searchWithFuzzyMatching(originalQuery: string): Promise<Track[]> 
   const queries = generateAlternativeQueries(originalQuery);
   console.log('Queries:', queries);
 
-  const [jioSaavnResults, gaanaResults] = await Promise.all([
-    (async () => {
-      let results = await searchJioSaavn(queries[0]);
-      if (results.length < 5 && queries.length > 1) {
-        const remaining = await Promise.all(queries.slice(1).map(q => searchJioSaavn(q)));
-        results = [...results, ...remaining.flat()];
-      }
-      return results;
-    })(),
-    searchGaana(queries[0]),
-  ]);
-
-  let allTracks = [...jioSaavnResults, ...gaanaResults];
-  console.log(`Tier 1 (JioSaavn + Gaana) — JioSaavn: ${jioSaavnResults.length}, Gaana: ${gaanaResults.length}, combined: ${allTracks.length}`);
-
-  if (allTracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK) {
-    console.log(`Tier 1 combined (${allTracks.length}) below threshold (${MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK}) — falling back to YouTube`);
-    const youtubeResults = await searchYouTube(queries[0]);
-    console.log(`Tier 2 (YouTube fallback) returned: ${youtubeResults.length}`);
-    allTracks = [...allTracks, ...youtubeResults];
+  // ── Plan A ──
+  let allTracks = await searchPlanA(queries[0]);
+  if (allTracks.length < 5 && queries.length > 1) {
+    const remaining = await Promise.all(queries.slice(1).map(q => searchPlanA(q)));
+    allTracks = [...allTracks, ...remaining.flat()];
   }
 
-  const finalTracks = dedupeAndRank(allTracks, normalizedForCache);
+  // ── Plan B — if Plan A came up empty ──
+  if (allTracks.length === 0) {
+    allTracks = await searchPlanB(queries[0]);
+  }
+
+  // ── Plan C — if Plan B also came up empty ──
+  if (allTracks.length === 0) {
+    allTracks = await searchPlanC(queries[0]);
+  }
+
+  // Deduplicate by ID
+  const seen = new Set<string>();
+  const unique: Track[] = [];
+  for (const t of allTracks) {
+    if (!seen.has(t.id)) { seen.add(t.id); unique.push(t); }
+  }
+
+  // Sort by relevance + popularity
+  const scored = unique
+    .map(t => ({ t, score: calculateRelevanceScore(normalizedForCache, t) }))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.t.playCount || 0) - (a.t.playCount || 0);
+    });
+
+  console.log('Top 5 results:');
+  scored.slice(0, 5).forEach(({ t, score }) => {
+    console.log(` ${score.toFixed(1).padStart(6)} | ${(t.playCount||0).toLocaleString().padStart(12)} | ${t.source} | ${t.title} — ${t.artist}`);
+  });
+
+  const finalTracks = scored.map(({ t }) => t);
   searchCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
-  return finalTracks;
-}
-
-// =============================================================================
-// NEW tiered path — lets the client render Tier 1 immediately and fetch
-// Tier 2 separately/later, instead of one call blocking until whichever
-// tier finishes last. Two independent caches so a repeat search is fast
-// on both tiers regardless of whether the client ends up needing tier2.
-// =============================================================================
-
-const tier1Cache = new Map<string, { tracks: Track[]; ts: number }>();
-const tier2Cache = new Map<string, { tracks: Track[]; ts: number }>();
-
-async function searchTier1Only(originalQuery: string): Promise<{ tracks: Track[]; shouldFetchMore: boolean }> {
-  const normalizedForCache = normalizeQuery(originalQuery);
-  const cached = tier1Cache.get(normalizedForCache);
-  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
-    console.log('[Tier1] Search cache HIT:', normalizedForCache);
-    return { tracks: cached.tracks, shouldFetchMore: cached.tracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK };
-  }
-
-  const queries = generateAlternativeQueries(originalQuery);
-  console.log('[Tier1] Queries:', queries);
-
-  const [jioSaavnResults, gaanaResults] = await Promise.all([
-    (async () => {
-      let results = await searchJioSaavn(queries[0]);
-      if (results.length < 5 && queries.length > 1) {
-        const remaining = await Promise.all(queries.slice(1).map(q => searchJioSaavn(q)));
-        results = [...results, ...remaining.flat()];
-      }
-      return results;
-    })(),
-    searchGaana(queries[0]),
-  ]);
-
-  const combined = [...jioSaavnResults, ...gaanaResults];
-  console.log(`[Tier1] JioSaavn: ${jioSaavnResults.length}, Gaana: ${gaanaResults.length}, combined: ${combined.length}`);
-
-  const finalTracks = dedupeAndRank(combined, normalizedForCache);
-  tier1Cache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
-
-  return { tracks: finalTracks, shouldFetchMore: finalTracks.length < MIN_RESULTS_BEFORE_YOUTUBE_FALLBACK };
-}
-
-async function searchTier2Only(originalQuery: string): Promise<Track[]> {
-  const normalizedForCache = normalizeQuery(originalQuery);
-  const cached = tier2Cache.get(normalizedForCache);
-  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
-    console.log('[Tier2] Search cache HIT:', normalizedForCache);
-    return cached.tracks;
-  }
-
-  const queries = generateAlternativeQueries(originalQuery);
-  console.log('[Tier2] Calling YouTube for:', queries[0]);
-
-  const youtubeResults = await searchYouTube(queries[0]);
-  console.log(`[Tier2] YouTube returned: ${youtubeResults.length}`);
-
-  const finalTracks = dedupeAndRank(youtubeResults, normalizedForCache);
-  tier2Cache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
-  return finalTracks;
-}
-
-// =============================================================================
-// FURTHER split: JioSaavn-only and Gaana-only, independently callable.
-//
-// Tier1 above already runs JioSaavn+Gaana in parallel — but it still
-// Promise.all's them together server-side, so the CLIENT doesn't see
-// anything until BOTH finish. If Gaana is slow (e.g. its Render free-tier
-// backend cold-starting after 15 min idle — a real, known 30-50s penalty,
-// not hypothetical), the whole tier1 response is gated on that even though
-// JioSaavn itself may have answered in 1-2s.
-//
-// These two let the CLIENT fire both in parallel and render each the
-// moment ITS OWN response lands — genuinely reduces time-to-first-result,
-// though NOT total time for everything to finish (that's still bounded by
-// whichever source is actually slowest; no way around that without fixing
-// the slow source itself).
-// =============================================================================
-
-const jioSaavnOnlyCache = new Map<string, { tracks: Track[]; ts: number }>();
-const gaanaOnlyCache = new Map<string, { tracks: Track[]; ts: number }>();
-
-async function searchJioSaavnOnly(originalQuery: string): Promise<Track[]> {
-  const normalizedForCache = normalizeQuery(originalQuery);
-  const cached = jioSaavnOnlyCache.get(normalizedForCache);
-  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
-    console.log('[JioSaavn-only] Search cache HIT:', normalizedForCache);
-    return cached.tracks;
-  }
-
-  const queries = generateAlternativeQueries(originalQuery);
-  let results = await searchJioSaavn(queries[0]);
-  if (results.length < 5 && queries.length > 1) {
-    const remaining = await Promise.all(queries.slice(1).map(q => searchJioSaavn(q)));
-    results = [...results, ...remaining.flat()];
-  }
-
-  const finalTracks = dedupeAndRank(results, normalizedForCache);
-  jioSaavnOnlyCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
-  return finalTracks;
-}
-
-async function searchGaanaOnly(originalQuery: string): Promise<Track[]> {
-  const normalizedForCache = normalizeQuery(originalQuery);
-  const cached = gaanaOnlyCache.get(normalizedForCache);
-  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
-    console.log('[Gaana-only] Search cache HIT:', normalizedForCache);
-    return cached.tracks;
-  }
-
-  const queries = generateAlternativeQueries(originalQuery);
-  const results = await searchGaana(queries[0]);
-
-  const finalTracks = dedupeAndRank(results, normalizedForCache);
-  gaanaOnlyCache.set(normalizedForCache, { tracks: finalTracks, ts: Date.now() });
   return finalTracks;
 }
 
@@ -587,7 +431,7 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
   try {
-    const { query, tier } = await req.json();
+    const { query } = await req.json();
 
     if (!query || typeof query !== 'string' || !query.trim()) {
       return new Response(
@@ -601,50 +445,6 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: `Query too long (max ${MAX_QUERY_LENGTH} chars)` }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // tier: 'tier1' -> JioSaavn+Gaana only, fast, tells the client whether
-    //   it's worth following up with tier2.
-    // tier: 'tier2' -> YouTube only, called separately by the client after
-    //   rendering tier1, only when tier1 said shouldFetchMore.
-    // tier omitted -> LEGACY single-call combined behavior, byte-identical
-    //   to before this change. Existing callers (PartyStage.tsx,
-    //   PartyQueue.tsx) haven't been updated to the tiered flow yet and
-    //   keep working exactly as they did.
-    if (tier === 'jiosaavn') {
-      const tracks = await searchJioSaavnOnly(trimmed);
-      console.log(`[JioSaavn-only] Returning ${tracks.length} tracks`);
-      return new Response(
-        JSON.stringify({ tracks }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (tier === 'gaana') {
-      const tracks = await searchGaanaOnly(trimmed);
-      console.log(`[Gaana-only] Returning ${tracks.length} tracks`);
-      return new Response(
-        JSON.stringify({ tracks }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (tier === 'tier1') {
-      const { tracks, shouldFetchMore } = await searchTier1Only(trimmed);
-      console.log(`[Tier1] Returning ${tracks.length} tracks, shouldFetchMore: ${shouldFetchMore}`);
-      return new Response(
-        JSON.stringify({ tracks, shouldFetchMore }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (tier === 'tier2') {
-      const tracks = await searchTier2Only(trimmed);
-      console.log(`[Tier2] Returning ${tracks.length} tracks`);
-      return new Response(
-        JSON.stringify({ tracks }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
