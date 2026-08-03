@@ -34,7 +34,6 @@ import { useAuth } from "@/hooks/useAuth";
 import { useTheme } from "@/hooks/useTheme";
 import { useBackGuard } from "@/hooks/useBackGuard";
 import { useVocalSeparation, warmUpModal } from "@/hooks/useVocalSeparation";
-import { getCachedTracks } from "@/lib/audioCache";
 import { fetchLyricsCached, parseDurationToSeconds } from "@/lib/lyricsClient";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -79,6 +78,7 @@ const Index = () => {
   const [query, setQuery] = useState('');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [trendingSongs, setTrendingSongs] = useState<string[]>([]);
   const [isLoadingTrending, setIsLoadingTrending] = useState(true);
@@ -156,19 +156,85 @@ const Index = () => {
     const trimmed = q.trim();
     if (!trimmed) return;
     setIsLoading(true);
+    setIsLoadingMore(false);
     setHasSearched(true);
+    setTracks([]);
+
+    const seenIds = new Set<string>();
+    let jioSaavnCount = 0;
+    let gaanaCount = 0;
+    let firstResultShown = false;
+
+    // Appends new results to whatever's already on screen — never replaces
+    // or re-sorts the existing list, so nothing jumps around while the
+    // user is looking at it. Whichever source answers first is what
+    // appears first.
+    const appendTracks = (newTracks: Track[]) => {
+      const filtered = newTracks.filter((t: Track) => !seenIds.has(t.id));
+      filtered.forEach((t: Track) => seenIds.add(t.id));
+      if (filtered.length === 0) return;
+      setTracks(prev => [...prev, ...filtered]);
+      if (!firstResultShown) {
+        firstResultShown = true;
+        setIsLoading(false); // clear the spinner the instant ANY source responds
+      }
+    };
+
     try {
-      const { data, error } = await supabase.functions.invoke('search-music', {
-        body: { query: trimmed },
-      });
-      if (error) throw error;
-      setTracks(data?.tracks ?? []);
+      // JioSaavn and Gaana fired as two INDEPENDENT calls (not one call
+      // that internally waits for both) — each renders the moment its own
+      // response lands. Previously both were bundled into a single tier1
+      // call that blocked on whichever was slower; if Gaana's Render
+      // backend has cold-started after being idle, that alone could add
+      // 30-50s to every search regardless of how fast JioSaavn answered.
+      await Promise.all([
+        supabase.functions.invoke('search-music', { body: { query: trimmed, tier: 'jiosaavn' } })
+          .then(({ data, error }) => {
+            if (error) { console.warn('[Index] JioSaavn search failed (non-fatal):', error); return; }
+            const tracks: Track[] = data?.tracks ?? [];
+            jioSaavnCount = tracks.length;
+            appendTracks(tracks);
+          })
+          .catch(err => console.warn('[Index] JioSaavn search failed (non-fatal):', err)),
+
+        supabase.functions.invoke('search-music', { body: { query: trimmed, tier: 'gaana' } })
+          .then(({ data, error }) => {
+            if (error) { console.warn('[Index] Gaana search failed (non-fatal):', error); return; }
+            const tracks: Track[] = data?.tracks ?? [];
+            gaanaCount = tracks.length;
+            appendTracks(tracks);
+          })
+          .catch(err => console.warn('[Index] Gaana search failed (non-fatal):', err)),
+      ]);
+
+      setIsLoading(false); // covers the case where neither source returned anything
+
+      // Same "fewer than 5 combined results" threshold used server-side
+      // for the legacy path — tested in search-fallback-threshold.test.ts.
+      // Duplicated here (not imported) since client and edge function are
+      // different runtimes; kept in sync manually.
+      const MIN_RESULTS_BEFORE_YOUTUBE = 5;
+      if (jioSaavnCount + gaanaCount < MIN_RESULTS_BEFORE_YOUTUBE) {
+        setIsLoadingMore(true);
+        try {
+          const { data, error } = await supabase.functions.invoke('search-music', {
+            body: { query: trimmed, tier: 'tier2' },
+          });
+          if (!error && data?.tracks?.length) {
+            appendTracks(data.tracks);
+          }
+        } catch (err) {
+          console.warn('[Index] Tier 2 (YouTube) search failed (non-fatal):', err);
+        } finally {
+          setIsLoadingMore(false);
+        }
+      }
     } catch (err) {
       console.error('[Index] Search failed:', err);
       toast({ title: 'Search failed', description: 'Please try again', variant: 'destructive' });
       setTracks([]);
-    } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
   }, [toast]);
 
@@ -200,19 +266,19 @@ const Index = () => {
         sessionStorage.setItem('prefetchedLyrics', JSON.stringify(result.lyrics));
     }).catch(() => {/* non-fatal */});
 
-    // Check IndexedDB — warm Modal only on cache miss (saves GPU cost)
-    getCachedTracks(track.id).then(cached => {
-      if (!cached) {
-        console.log('[Index] Cache miss — warming Modal for:', track.title);
-        warmUpModal();
-      } else {
-        console.log('[Index] Cache hit — skipping Modal warmup for:', track.title);
-      }
-      // Start separation regardless — hook returns cached result instantly on hit
-      separateVocals(track.audioUrl, 'fast', track.id);
-    }).catch(() => {
-      warmUpModal();
-      separateVocals(track.audioUrl, 'fast', track.id);
+    // Caching now lives server-side (Supabase Storage, checked inside the
+    // separate-vocals edge function) — there's no cheap local check anymore
+    // to decide whether to skip the warmup ping. Fire both unconditionally;
+    // the warmup ping is lightweight and harmless even on a Storage cache
+    // hit (the edge function just won't end up needing Modal at all).
+    warmUpModal();
+    // songMeta lets the edge function compute a canonical cache key
+    // (title+artist+duration) so this song hits the shared Storage cache
+    // even if it was already separated from a different source earlier.
+    separateVocals(track.audioUrl, 'fast', track.id, {
+      title: track.title,
+      artist: track.artist,
+      durationSeconds: parseDurationToSeconds(track.duration) ?? 0,
     });
 
     navigate(`/sing/${track.id}`);
@@ -420,6 +486,12 @@ const Index = () => {
                   </div>
                 ))}
               </div>
+              {isLoadingMore && (
+                <div className="py-4 text-center">
+                  <Loader2 className="w-4 h-4 animate-spin text-muted-foreground mx-auto mb-1" />
+                  <p className="text-xs text-muted-foreground">Looking for more...</p>
+                </div>
+              )}
             </>
           ) : null}
         </div>
