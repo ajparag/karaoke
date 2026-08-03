@@ -21,29 +21,73 @@
 //   - Toaster — the one toast system actually used.
 // =============================================================================
 
-import { Component, ReactNode, Suspense, lazy } from "react";
+import { Component, ComponentType, ReactNode, Suspense, lazy } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import { ThemeProvider } from "@/hooks/useTheme";
 import { AuthCallbackGate } from "@/components/AuthCallbackGate";
 
+// =============================================================================
+// lazyWithReload — self-heals stale-chunk errors after a new deployment.
+// =============================================================================
+// Every deploy gives each lazy-loaded page a NEW hashed filename (e.g.
+// Sing-3d0x4T3D.js -> Sing-a8Kx91Qz.js). If someone has the site open (or
+// cached) from before a deploy and then navigates to a page they haven't
+// loaded yet, the browser tries to fetch the OLD hash -- which no longer
+// exists on the server, since the new deploy replaced it. That's exactly
+// what "Failed to fetch dynamically imported module" means. It is NOT a
+// bug in the page itself, and NOT related to anything the user clicked.
+//
+// Fix: catch that specific failure and reload the page ONCE. The fresh
+// page load fetches the current index.html, which points to the correct,
+// currently-live chunk hashes -- the error self-heals invisibly.
+//
+// The sessionStorage guard prevents an infinite reload loop if the fetch
+// keeps failing for a genuinely different reason (e.g. the user is
+// offline) -- in that case it fails through to the normal error boundary
+// after one attempt, instead of reload-looping forever.
+function lazyWithReload<T extends { default: ComponentType<any> }>(
+  factory: () => Promise<T>
+) {
+  return lazy(async () => {
+    try {
+      const module = await factory();
+      // Successful load — clear the guard so a FUTURE genuine stale-chunk
+      // error (from a later deploy) is still allowed one reload attempt.
+      sessionStorage.removeItem('chunk-reload-attempted');
+      return module;
+    } catch (error) {
+      const alreadyReloaded = sessionStorage.getItem('chunk-reload-attempted');
+      if (!alreadyReloaded) {
+        sessionStorage.setItem('chunk-reload-attempted', '1');
+        window.location.reload();
+        // Never resolves -- the page is about to reload anyway, and
+        // returning here would briefly flash the ErrorBoundary first.
+        return new Promise(() => {});
+      }
+      // Already tried reloading once and it still failed — a real error,
+      // not a stale-chunk issue. Let it surface normally.
+      throw error;
+    }
+  });
+}
+
 // Index loads eagerly — it's the landing page, must be instant
 import Index from "./pages/Index";
 
 // All other pages are lazy — loaded on first navigation to that route.
 // Vite splits each into its own chunk automatically.
-const Auth        = lazy(() => import("./pages/Auth"));
-const Sing        = lazy(() => import("./pages/Sing"));
-const Leaderboard = lazy(() => import("./pages/Leaderboard"));
-const History     = lazy(() => import("./pages/History"));
-const Profile     = lazy(() => import("./pages/Profile"));
-const CreateParty = lazy(() => import("./pages/CreateParty"));
-const JoinParty   = lazy(() => import("./pages/JoinParty"));
-const PartyStage  = lazy(() => import("./pages/PartyStage"));
-const PartyQueue  = lazy(() => import("./pages/PartyQueue"));
-const NotFound    = lazy(() => import("./pages/NotFound"));
-const PrivacyPolicy = lazy(() => import("./pages/PrivacyPolicy"));
+const Auth        = lazyWithReload(() => import("./pages/Auth"));
+const Sing        = lazyWithReload(() => import("./pages/Sing"));
+const Leaderboard = lazyWithReload(() => import("./pages/Leaderboard"));
+const History     = lazyWithReload(() => import("./pages/History"));
+const Profile     = lazyWithReload(() => import("./pages/Profile"));
+const CreateParty = lazyWithReload(() => import("./pages/CreateParty"));
+const JoinParty   = lazyWithReload(() => import("./pages/JoinParty"));
+const PartyStage  = lazyWithReload(() => import("./pages/PartyStage"));
+const PartyQueue  = lazyWithReload(() => import("./pages/PartyQueue"));
+const NotFound    = lazyWithReload(() => import("./pages/NotFound"));
 
 // Minimal loading fallback — shown while a lazy chunk downloads.
 // Intentionally plain: the page's own UI takes over as soon as it's ready.
@@ -103,7 +147,6 @@ const App = () => (
                 <Route path="/party/:code/stage"   element={<PartyStage />} />
                 <Route path="/party/:code/queue"   element={<PartyQueue />} />
                 <Route path="*"                    element={<NotFound />} />
-                <Route path="/privacy"             element={<PrivacyPolicy />} />
               </Routes>
             </Suspense>
           </HashRouter>
