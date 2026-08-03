@@ -1,6 +1,36 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!--
+      Cache-control meta tags — ask the browser to never cache this HTML
+      document at all. Placed FIRST in <head>, before anything else,
+      since some browsers only honor http-equiv cache directives if they
+      appear early in the document.
+
+      WHY THIS MATTERS: every deploy gives the app's JS files new hashed
+      filenames (e.g. Sing-3d0x4T3D.js -> Sing-a8Kx91Qz.js). If a browser
+      (or an intermediate cache, e.g. some ISP-level caching in India)
+      serves a STALE copy of this index.html after a new deploy, it will
+      reference JS chunk filenames that no longer exist on the server —
+      causing "Failed to fetch dynamically imported module" errors that
+      persist across normal visits, not just one open tab.
+
+      GitHub Pages does not provide a config file for setting real HTTP
+      Cache-Control response headers (unlike Netlify/Cloudflare Pages/
+      Vercel), so these meta tags are the strongest lever available
+      without changing hosting providers. They are not as reliable as
+      real HTTP headers per current browser specs, but are still honored
+      by most browsers for the top-level document fetch and cost nothing
+      to include defensively.
+
+      The hashed JS/CSS asset files themselves are NOT affected by this —
+      they're safe to cache aggressively/forever, since a new build always
+      produces new filenames for changed content.
+    -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+
     <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-J45Q3PHRB9"></script>
 <script>
