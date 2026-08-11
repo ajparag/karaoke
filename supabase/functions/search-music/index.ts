@@ -277,7 +277,13 @@ async function searchGaana(query: string): Promise<Track[]> {
 
   console.log('[Gaana] Gaana query:', query);
   try {
-    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search?query=${encodeURIComponent(query)}&limit=20`;
+    // GaanaPy's app.py defines this route as "/songs/search/" (trailing
+    // slash) with `FastAPI(redirect_slashes=False)` — meaning FastAPI will
+    // NOT auto-redirect a no-slash request to the slashed version like it
+    // normally would. Omitting the trailing slash here was a silent 404
+    // for every single Gaana search once the Render deploy was refreshed
+    // to the current main branch (confirmed via Render's own request logs).
+    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search/?query=${encodeURIComponent(query)}&limit=20`;
     const response = await timedFetch(url, 10000);
     if (!response.ok) {
       console.error('[Gaana] Gaana error:', response.status);
