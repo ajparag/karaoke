@@ -31,4 +31,68 @@
     <changefreq>daily</changefreq>
     <priority>0.60</priority>
   </url>
+
+  <!-- User Profile -->
+  <url>
+    <loc>https://karaokeparty.in/#/profile</loc>
+    <lastmod>2026-08-11</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.50</priority>
+  </url>
+
+  <!-- Host a Karaoke Party -->
+  <url>
+    <loc>https://karaokeparty.in/#/party/host</loc>
+    <lastmod>2026-08-11</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.70</priority>
+  </url>
+
+  <!-- Join a Karaoke Party -->
+  <url>
+    <loc>https://karaokeparty.in/#/party/join</loc>
+    <lastmod>2026-08-11</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.70</priority>
+  </url>
+
+  <!-- Privacy Policy -->
+  <url>
+    <loc>https://karaokeparty.in/#/privacy</loc>
+    <lastmod>2026-08-11</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.30</priority>
+  </url>
+
+  <!-- Blog — Index -->
+  <url>
+    <loc>https://karaokeparty.in/blog/</loc>
+    <lastmod>2026-08-06</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.70</priority>
+  </url>
+
+  <!-- Blog — Best Hindi Karaoke Songs for Parties -->
+  <url>
+    <loc>https://karaokeparty.in/blog/best-hindi-karaoke-songs-for-parties/</loc>
+    <lastmod>2026-08-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.60</priority>
+  </url>
+
+  <!-- Blog — How AI Karaoke Scoring Works -->
+  <url>
+    <loc>https://karaokeparty.in/blog/how-ai-karaoke-scoring-works/</loc>
+    <lastmod>2026-08-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.60</priority>
+  </url>
+
+  <!-- Blog — How to Host a Karaoke Party at Home -->
+  <url>
+    <loc>https://karaokeparty.in/blog/how-to-host-a-karaoke-party-at-home/</loc>
+    <lastmod>2026-08-06</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.60</priority>
+  </url>
 </urlset>
