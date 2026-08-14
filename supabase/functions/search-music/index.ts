@@ -164,9 +164,19 @@ function generateAlternativeQueries(query: string): string[] {
   return Array.from(alts).slice(0, 3);
 }
 
-// ─── JioSaavn: saavn.sumit.co ────────────────────────────────────────────────
+// ─── JioSaavn: sumitkolhe/jiosaavn-api (self-hosted fork on Render) ───────────
 
-const SAAVN_API_BASE = 'https://saavn.sumit.co/api';
+// v4 — Switched to a self-hosted fork of sumitkolhe/jiosaavn-api on Render
+//   (jiosaavn-ckkv.onrender.com), since saavn.sumit.co started going
+//   offline very regularly. Confirmed field-for-field identical response
+//   shape via a real live request before making this change — same
+//   {success, data:{results:[...]}} wrapper, same downloadUrl quality
+//   tiers (160kbps/96kbps/etc), same image quality variants, same
+//   artists.primary structure. This is genuinely the same underlying
+//   software (the root page's own metadata links to saavn.dev, Sumit
+//   Kolhe's official reference deployment) — a pure URL swap, no parsing
+//   logic changed.
+const SAAVN_API_BASE = 'https://jiosaavn-ckkv.onrender.com/api';
 
 async function fetchSaavnPage(query: string, page: number): Promise<any[] | null> {
   try {
@@ -197,7 +207,7 @@ async function fetchSaavnPage(query: string, page: number): Promise<any[] | null
 }
 
 async function searchJioSaavn(query: string): Promise<Track[]> {
-  console.log('[JioSaavn] saavn.sumit.co query:', query);
+  console.log('[JioSaavn] jiosaavn-ckkv.onrender.com query:', query);
   const PAGES_TO_FETCH = 4;
   const pageResults = await Promise.all(
     Array.from({ length: PAGES_TO_FETCH }, (_, i) => fetchSaavnPage(query, i + 1))
@@ -283,7 +293,15 @@ async function searchGaana(query: string): Promise<Track[]> {
     // normally would. Omitting the trailing slash here was a silent 404
     // for every single Gaana search once the Render deploy was refreshed
     // to the current main branch (confirmed via Render's own request logs).
-    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search/?query=${encodeURIComponent(query)}&limit=20`;
+    // limit reduced 20 -> 10. GaanaPy's search_songs() fetches full track
+    // details for each result via asyncio.gather — genuinely parallel, not
+    // sequential (confirmed by reading the actual source). But parallel
+    // execution time is bounded by the SLOWEST of the N concurrent
+    // requests, not their sum — each additional track is another chance
+    // to draw an unlucky, slow straggler from Gaana's backend. Fewer
+    // parallel requests = less exposure to that tail latency. 10 results
+    // combined with JioSaavn's own results is still plenty for a search list.
+    const url = `${gaanaBase.replace(/\/$/, '')}/songs/search/?query=${encodeURIComponent(query)}&limit=10`;
     const response = await timedFetch(url, 10000);
     if (!response.ok) {
       console.error('[Gaana] Gaana error:', response.status);
