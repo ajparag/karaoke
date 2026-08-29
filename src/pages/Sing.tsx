@@ -916,12 +916,23 @@ const Sing = () => {
         </div>
       </header>
 
-      {/* ── Separation wait screen ── */}
+      {/* ── Separation wait screen ──
+          estimatedSeconds raised for both tiers -- the old values (30/50)
+          were never realistic. Real Modal timings from Supabase edge
+          function logs (all confirmed 'fast' tier: 56s, 57s, 72s, 82s,
+          89s, 116s) cluster mostly around 60-90s, well above the old 30s
+          fast-tier assumption. 60 is a directly data-backed choice for
+          fast tier. Background tier's 75 is NOT directly measured the
+          same way -- no background-tier timing logs were available when
+          this was set -- scaled up proportionally from fast tier's real
+          numbers on the assumption background (T4 GPU) is at least as
+          slow as fast (A10G GPU), possibly slower. Worth correcting with
+          real background-tier log data if/when available. */}
       <SeparationWaitScreen
         track={track}
         isVisible={!separatedAudio && !!track}
         startedAt={separationStartedAt}
-        estimatedSeconds={activeTier === 'background' ? 50 : 30}
+        estimatedSeconds={activeTier === 'background' ? 75 : 60}
       />
 
       {/* ── End-of-song results overlay ── */}
