@@ -320,7 +320,11 @@ const Sing = () => {
     if (isTestPlayerMode || !track?.audioUrl || separatedAudio || isLoadingFromCache) return;
     if (separationTriggeredRef.current === track.audioUrl) return;
     separationTriggeredRef.current = track.audioUrl;
-    loadFromCache(track.audioUrl, 'fast', track.id);
+    loadFromCache(track.audioUrl, 'fast', track.id, {
+      title: track.title,
+      artist: track.artist,
+      durationSeconds: trackDurationSecs,
+    });
   }, [track?.audioUrl, separatedAudio, isLoadingFromCache, loadFromCache, isTestPlayerMode]);
 
   // ── Per-track guard reset ───────────────────────────────────────────────────
@@ -456,6 +460,18 @@ const Sing = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track?.audioUrl, separatedAudio?.instrumentalUrl, isTestPlayerMode, session?.access_token]);
 
+  // Single source of truth for "should the vocals guide be silent right
+  // now" -- used identically in all three places that touch this audio
+  // element (creation, playback sync, volume sync). Previously each place
+  // had its own slightly-different version of this check (some checked
+  // vocalsEnabled only, some checked vocalsVolume === 0 only, some both).
+  // Nothing enforced they could never disagree -- a real gap where, e.g.,
+  // vocalsVolume could theoretically sit at 0 while vocalsEnabled was
+  // still true, leaving the audio playing unmuted at effectively-zero
+  // volume instead of guaranteed silent. Collapsing to one boolean means
+  // there's no longer a seam for that kind of desync to hide in.
+  const vocalsShouldBeSilent = !vocalsEnabled || vocalsVolume === 0;
+
   // ── Audible guide vocals element ────────────────────────────────────────────
   useEffect(() => {
     if (!separatedAudio?.vocalsUrl) {
@@ -466,7 +482,9 @@ const Sing = () => {
     audio.crossOrigin = 'anonymous';
     audio.src = separatedAudio.vocalsUrl;
     audio.preload = 'auto';
-    audio.volume = (vocalsEnabled && vocalsVolume > 0) ? vocalsVolume / 100 : 0;
+    audio.volume = vocalsShouldBeSilent ? 0 : vocalsVolume / 100;
+    audio.muted = vocalsShouldBeSilent; // set on creation too, not just in the sync effect below --
+                                         // defensive against any gap before that effect's first run
     vocalsAudioRef.current = audio;
     return () => { audio.pause(); audio.src = ''; vocalsAudioRef.current = null; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -476,7 +494,10 @@ const Sing = () => {
   useEffect(() => {
     const audio = vocalsAudioRef.current;
     if (!audio || !separatedAudio?.vocalsUrl) return;
-    if (isPlaying && vocalsEnabled) {
+    // Checks vocalsShouldBeSilent now, not just vocalsEnabled -- guarantees
+    // the audio element is actually PAUSED whenever it should be silent,
+    // not just muted/zero-volume while technically still playing.
+    if (isPlaying && !vocalsShouldBeSilent) {
       if (audioRef.current) audio.currentTime = audioRef.current.currentTime;
       // Ignore AbortError — it just means pause() was called before play() finished
       // Ignore NotAllowedError — vocals are supplementary, main audio still plays
@@ -488,14 +509,14 @@ const Sing = () => {
     } else {
       audio.pause();
     }
-  }, [isPlaying, vocalsEnabled, separatedAudio?.vocalsUrl]);
+  }, [isPlaying, vocalsShouldBeSilent, separatedAudio?.vocalsUrl]);
 
   // Sync vocals volume
   useEffect(() => {
     if (!vocalsAudioRef.current) return;
-    vocalsAudioRef.current.volume = (vocalsEnabled && vocalsVolume > 0) ? vocalsVolume / 100 : 0;
-    vocalsAudioRef.current.muted = !vocalsEnabled || vocalsVolume === 0;
-  }, [vocalsEnabled, vocalsVolume]);
+    vocalsAudioRef.current.volume = vocalsShouldBeSilent ? 0 : vocalsVolume / 100;
+    vocalsAudioRef.current.muted = vocalsShouldBeSilent;
+  }, [vocalsShouldBeSilent, vocalsVolume]);
 
   // ── Live score ──────────────────────────────────────────────────────────────
   const metricsRef = useRef(metrics);
