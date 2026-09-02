@@ -204,6 +204,20 @@ interface RankedResult {
 const COVER_KEYWORDS = /\b(cover|remix|karaoke|instrumental|live|acoustic|unplugged|slowed|reverb|lofi|lo-fi|mashup|reprise|recreated)\b/i;
 const FEAT_PATTERN = /\(feat\..*?\)/i;
 
+// Word-overlap check for the "partial title" tiers below. Filters out
+// short/common words (length <= 3) before comparing -- without this,
+// filler words like Hindi "hai" ("is/am/are") coincidentally collide
+// with unrelated titles in other languages (e.g. Italian "hai", "you
+// have") and would falsely count as a title match. Requires at least
+// one shared meaningful word; titles with no meaningful words at all
+// (all short/common) are treated as unverifiable, not auto-accepted.
+function hasPartialTitleOverlap(nameCore: string, titleCore: string): boolean {
+  const titleWords = titleCore.split(/\s+/).filter(w => w.length > 3);
+  if (titleWords.length === 0) return false;
+  const nameWords = new Set(nameCore.split(/\s+/).filter(w => w.length > 3));
+  return titleWords.some(w => nameWords.has(w));
+}
+
 export function pickBestResult(
   pool: any[],
   title: string,
@@ -221,6 +235,7 @@ export function pickBestResult(
     isExactTitle: boolean;
     isCoverVariant: boolean;
     isAlbumDurationMatch: boolean; // partial title, but album + duration confirm it's the right recording
+    hasPartialTitleMatch: boolean; // shares at least one meaningful word with the query title
     durScore: number;
     scriptScore: number;
     script: Script;
@@ -257,11 +272,13 @@ export function pickBestResult(
       && Math.abs(item.duration - duration) <= 1;
     const isAlbumDurationMatch = !isExactTitle && !isCoverVariant && albumMatches && durationMatches;
 
+    const hasPartialTitleMatch = isExactTitle || hasPartialTitleOverlap(nameCore, titleCore);
+
     const lyricsText = item.syncedLyrics || item.plainLyrics || '';
     const script = detectScript(lyricsText);
     const scriptScore = scriptPenalty(script, language);
 
-    return { item, isExactTitle, isCoverVariant, isAlbumDurationMatch, durScore, scriptScore, script };
+    return { item, isExactTitle, isCoverVariant, isAlbumDurationMatch, hasPartialTitleMatch, durScore, scriptScore, script };
   });
 
   // Split synced vs plain -- synced ALWAYS preferred
@@ -277,12 +294,16 @@ export function pickBestResult(
   // stronger evidence of being the right recording than an exact title
   // that might turn out to be a cover/remix version.
   const tiers: ((c: Classified) => boolean)[] = [
-    c => c.isExactTitle && !c.isCoverVariant,   // Tier 1: exact + original
-    c => c.isAlbumDurationMatch,                 // Tier 2: partial title, confirmed by album+duration
-    c => c.isExactTitle,                         // Tier 3: exact + covers OK
-    c => !c.isCoverVariant,                      // Tier 4: partial + original (unconfirmed)
-    () => true,                                  // Tier 5: anything
+    c => c.isExactTitle && !c.isCoverVariant,          // Tier 1: exact + original
+    c => c.isAlbumDurationMatch,                        // Tier 2: partial title, confirmed by album+duration
+    c => c.isExactTitle,                                // Tier 3: exact + covers OK
+    c => c.hasPartialTitleMatch && !c.isCoverVariant,   // Tier 4: real partial-title match + original
+    c => c.hasPartialTitleMatch,                        // Tier 5: real partial-title match, covers OK (last resort)
   ];
+  // No unconditional catch-all tier: if nothing shares even one
+  // meaningful word with the query title, `survivors` stays empty below
+  // and pickBestResult returns null -- no lyrics is a better outcome
+  // than confidently wrong lyrics for an unrelated song.
 
   let survivors: Classified[] = [];
   for (const filter of tiers) {
